@@ -1,9 +1,8 @@
 import torch.nn as nn
-from transformers import BertPreTrainedModel, BertModel
+from transformers import BertPreTrainedModel, BertModel, BertConfig
 import torch
 from torch.utils.data import (DataLoader, RandomSampler, TensorDataset)
-
-
+from kobert_tokenizer import KoBERTTokenizer
 
 class SentimentClassifier(BertPreTrainedModel):
     
@@ -95,7 +94,7 @@ def train(config):
     setattr(bert_config, "num_labels", config["num_labels"])
     
     # BERT tokenizer 객체 생성
-    bert_tokenizer = KoBertTokenizer.from_pretrained(pretrained_model_nam_or_path=config["pretrained_model_name_or_path"],
+    bert_tokenizer = KoBERTTokenizer.from_pretrained(pretrained_model_nam_or_path=config["pretrained_model_name_or_path"],
                                                      cache_dir=config["cache_dir_path"])
     
     # 라벨 딕셔너리 생성
@@ -153,7 +152,7 @@ def test(config):
                                                      cache_dir=config["cache_dir_path"])
     
     # BERT tokenizer 객체 생성
-    bert_tokenizer = KoBertTokenizer.from_pretrained(pretrained_model_nam_or_path=config["pretrained_model_name_or_path"],
+    bert_tokenizer = KoBERTTokenizer.from_pretrained(pretrained_model_nam_or_path=config["pretrained_model_name_or_path"],
                                                      cache_dir=config["cache_dir_path"])
     # 라벨 딕셔너리 생성
     label2idx, idx2label = read_vocab_data(vocab_data_path=config["label_vocab_data_path"])
