@@ -108,19 +108,19 @@ def load_dataset(config):
 def train(config):
        
     # 데이터 읽기
-    eumjeol_features, eumjeol_features_length, label_features, eumjeol2idx, idx2eumjeol, label2idx, idx2label = load_dataset(config)
+    eumjeol_features, eumjeol_features_lengths, label_features, eumjeol2idx, idx2eumjeol, label2idx, idx2label = load_dataset(config)
     
     # 모델 생성
     model = SpacingRNN(config).cuda()  # CPU 사용 시 .cuda() 제거
-    # 사전학습한 모델 파일로부터 가중치 로드
-    model.load_state_dict(torch.load(os.path.join(config["output_dir_path"], config["model_name"])))
+    # # 사전학습한 모델 파일로부터 가중치 로드
+    # model.load_state_dict(torch.load(os.path.join(config["output_dir_path"], config["model_name"])))
         
     # TensorDataset/DataLoader를 통해 배치(batch) 단위로 데이터를 나누고 셔플(shuffle)
-    train_features = TensorDataset(input_features, labels)
+    train_features = TensorDataset(eumjeol_features, eumjeol_features_lengths, label_features)
     train_dataloader = DataLoader(train_features, shuffle=True, batch_size=config["batch_size"])
     
     # 이진분류 크로스엔트로피 비용 함수
-    loss_func = nn.MSELoss()
+    loss_func = nn.CrossEntropyLoss(ignore_index=0)
     # 옵티마이저 함수 (역전파 알고리즘을 수행할 함수)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     
@@ -167,46 +167,54 @@ def train(config):
 # 모델 평가 함수            
 def test(config):
     # 데이터 읽기
-    eumjeol_features, eumjeol_features_length, label_features, eumjeol2idx, idx2eumjeol, label2idx, idx2label = load_dataset(config)
-    # 모델 생성
+    eumjeol_features, eumjeol_feature_lengths, label_features, eumjeol2idx, idx2eumjeol, label2idx, idx2label = load_dataset(config)
+
+    # 평가 데이터를 batch 단위로 추출하기 위한 DataLoader 객체 생성
+    test_features = TensorDataset(eumjeol_features, eumjeol_feature_lengths, label_features)
+    test_dataloader = DataLoader(test_features, shuffle=False, batch_size=1)
+
+    # RNN 모델 객체 생성
     model = SpacingRNN(config).cuda()
-    
-    # 저장된 모델 가중치 로드
+    # 사전학습한 모델 파일로부터 가중치 불러옴
     model.load_state_dict(torch.load(os.path.join(config["output_dir_path"], config["model_name"])))
-    
-    # 데이터 load
-    (input_features, labels) = load_dataset(config["input_data"])
-    
-    test_features = TensorDataset(input_features, labels)
-    test_dataloader = DataLoader(test_features, shuffle=False, batch_size=config["batch_size"])
-    
+
+    # 모델의 출력 결과와 실제 정답값을 담을 리스트
+    total_hypothesis, total_labels = [], []
+
     for step, batch in enumerate(test_dataloader):
+
+        model.eval()
+        batch = tuple(t.cuda() for t in batch)
+
         # 음절 데이터, 각 데이터의 실제 길이, 라벨 데이터
         inputs, input_lengths, labels = batch[0], batch[1], batch[2]
-        
+
         # 모델 평가
         hypothesis = model(inputs)
-        
+
         # (batch_size, max_length, number_of_labels) -> (batch_size, max_length)
         hypothesis = torch.argmax(hypothesis, dim=-1)
-        
+
         # batch_size가 1이기 때문
-        input_length = tensor2list(input_lengths)[0]
-        input = tensor2list(inputs)[0][:input_length]
-        label = tensor2list(labels)[0][:input_length]
+        input_length = tensor2list(input_lengths[0])
+        input = tensor2list(inputs[0])[:input_length]
+        label = tensor2list(labels[0])[:input_length]
         hypothesis = tensor2list(hypothesis[0])[:input_length]
-        
+
         # 출력 결과와 정답을 리스트에 저장
-        total_hypothesis+=hypothesis
-        total_label+=label
-    if (step<10):
-        # 정답과 모델 출력 비교
-        predict_sentence, correct_sentence = make_sentence(input, hypothesis, label, idx2eumjeol, idx2label)
-        print("정답 : "+correct_sentence)
-        print("출력 : "+predict_sentence)
-        print()
-    
-    do_test(model, test_dataloader)
+        total_hypothesis += hypothesis
+        total_labels += label
+
+        if (step < 10):
+            # 정답과 모델 출력 비교
+            predict_sentence, correct_sentence = make_sentence(input, hypothesis, label, idx2eumjeol, idx2label)
+            print("정답 : " + correct_sentence)
+            print("출력 : " + predict_sentence)
+            print()
+
+    # 정확도 출력
+    print("Accuracy : {}".format(accuracy_score(total_labels, total_hypothesis)))    
+    # do_test(model, test_dataloader)
     
 def make_sentence(inputs, predicts, labels, idx2eumjeol, idx2label):
     predict_sentence, correct_sentence = "", ""
@@ -268,4 +276,31 @@ def do_test(model, test_dataloader):
     
     print("PRED=", predicts)
     print("GOAL=", goals)
-    print("ACCURACY= {0:f}\n", format(accuracy_score(goals, predicts)))
+    print("ACCURACY= {0:f}\n", format(accuracy_score(goals, predicts)))    
+
+if(__name__=="__main__"):
+    root_dir = "/gdrive/My Drive/colab/rnn/spacing"
+    output_dir = os.path.join(root_dir, "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    config = {"mode": "train",
+              "model_name":"epoch_{0:d}.pt".format(5),
+              "input_data":os.path.join(root_dir, "train.txt"),
+              "output_dir_path":output_dir,
+              "eumjeol_vocab": os.path.join(root_dir, "eumjeol_vocab.txt"),
+              "label_vocab": os.path.join(root_dir, "label_vocab.txt"),
+              "eumjeol_vocab_size": 2458,
+              "embedding_size": 100,
+              "hidden_size": 100,
+              "max_length": 920,
+              "number_of_labels": 3,
+              "epoch":5,
+              "batch_size":64,
+              "dropout":0.3
+              }
+
+    if(config["mode"] == "train"):
+        train(config)
+    else:
+        test(config)
