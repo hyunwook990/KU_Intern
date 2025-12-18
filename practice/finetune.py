@@ -103,5 +103,3 @@ if __name__ == '__main__':
     )
 
     trainer.train()  # 모델 학습
-
-
