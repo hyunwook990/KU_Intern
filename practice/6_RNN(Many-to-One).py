@@ -30,10 +30,10 @@ class STOCK_RNN(nn.Module):
         
     def forward(self, input_features):
         
-        # LSTM 리턴 = output, (배치, 시퀀스, 은닉 상태), (hidden_state, cell_state)
+        # LSTM 리턴 = output(배치, 시퀀스, 은닉 상태), (hidden_state, cell_state)
         x, (h_n, c_n) = self.lstm(input_features)
         
-        # ouput에서 마지막 시퀀스의 (배치, 은닉 상태) 정보를 가져옴
+        # ouput의 마지막 시퀀스의 (배치, 은닉 상태) 정보를 가져옴
         h_t = x[:, -1, :]
         
         # 출력층: (배치, 출력)
