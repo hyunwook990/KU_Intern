@@ -1,5 +1,4 @@
 from konlpy.tag import Mecab
-import numpy as np
 from gensim.models import Word2Vec, KeyedVectors
 
 texts = ["죽는 날까지 하늘을 우러러 한 점 부끄럼이 없기를",
@@ -13,14 +12,16 @@ texts = ["죽는 날까지 하늘을 우러러 한 점 부끄럼이 없기를",
 m = Mecab()
 result = []
 
+print("###########################################")
 for sent in texts:
     tag = m.pos(sent)
     words = []
     for(lex, pos) in tag:
+        print(lex, pos)
         if pos[0] == 'N':  # 명사류(체언)만 추출
             words.append(lex)
     result.append(words)
-    
+print("###########################################")
 print(result, "\n")
 
 # Word2Vec 학습시키기
@@ -32,14 +33,14 @@ print(model.wv['하늘'])
 # 유사한 단어 가져오기
 print(model.wv.most_similar('하늘'), "\n")
 
-# Word2Vec 모델 저장하기
-model.wv.save_word2vec_format('/gdrive/My_Drive/colab/text_rep/test_w2v')
+# # Word2Vec 모델 저장하기
+# model.wv.save_word2vec_format('/gdrive/My_Drive/colab/text_rep/test_w2v')
 
-# Word2Vec 모델 로드하기
-loaded_model = KeyedVectors.load_word2vec_format('/gdrive/My_Drive/colab/text_rep/test_w2v')
+# # Word2Vec 모델 로드하기
+# loaded_model = KeyedVectors.load_word2vec_format('/gdrive/My_Drive/colab/text_rep/test_w2v')
 
-# 값 읽어오기
-print(loaded_model['하늘'])
+# # 값 읽어오기
+# print(loaded_model['하늘'])
 
-# 유사한 단어 가져오기
-print(loaded_model.wv.most_similar('하늘'))
+# # 유사한 단어 가져오기
+# print(loaded_model.wv.most_similar('하늘'))
