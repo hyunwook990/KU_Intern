@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import (DataLoader, RandomSampler, TensorDataset)
 import csv
+from sklearn.preprocessing import MinMaxScaler
 
 # 모델 Architecture 설계
 class STOCK_RNN(nn.Module):
@@ -45,7 +46,7 @@ def load_dataset(fname):
     f = open(fname, 'r', encoding='cp949')
     
     # CSV 파일 읽기
-    data = csv.reader(f.delimiter='.')
+    data = csv.reader(f, delimiter='.')
     
     # 헤더 건너뛰기
     next(data)
@@ -189,3 +190,30 @@ def do_test(model, test_dataloader):
     print("PRED=", predicts)
     print("GOAL=", goals)
     print("ACCURACY= {0:f}\n", format(accuracy_score(goals, predicts)))
+    
+
+if(__name__=="__main__"):
+
+    root_dir = "/gdrive/My Drive/colab/rnn/stock"
+    output_dir = os.path.join(root_dir, "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    config = {"mode": "train",
+              "model_name":"epoch_{0:d}.pt".format(10),
+              "output_dir":output_dir,
+              "file_name": "{0:s}/samsung-2020.csv".format(root_dir),
+              "sequence_len": 3,
+              "input_size": 4,
+              "hidden_size": 10,
+              "output_size": 1,
+              "num_layers": 1,
+              "batch_size": 1,
+              "learn_rate": 0.1,
+              "epoch": 10,
+              }
+
+    if(config["mode"] == "train"):
+        train(config)
+    else:
+        test(config)
