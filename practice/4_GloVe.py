@@ -1,6 +1,7 @@
 # 4.Word2Vec.py에서 생성한 전처리된 데이터를 사용
 
-# pip install glove-p[ython-binary
+# pip install glove-python3
+# mac에선 glove가 설치되지 않음 window에서 다시 해야할 듯
 
 # Co-Occurrence Matrix 생성
 from glove import Corpus
