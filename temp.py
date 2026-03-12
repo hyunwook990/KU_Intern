@@ -54,7 +54,6 @@ inputs = tokenizer.apply_chat_template(
 	return_dict=True,
 	return_tensors="pt",
 ).to(model.device)
-print(inputs)
 
 outputs = model.generate(
     **inputs, # inputs가 dict 형식으로 반환되기 때문에
