@@ -1,7 +1,7 @@
 # MAS-GPT practice
 - 논문 출처: https://arxiv.org/abs/2503.03686
 
-### 2026.03.09
+## 2026.03.09
 - 논문에서 나온 내용중 구현에 참고할 내용들을 확인
 1. Following this framework, we first re-implement several existing MAS methods (e.g., Multi-Agent Debate (Duet al., 2024), Self-Consistency (Wang et al., 2024b), Self-Refine (Madaan et al., 2024)) to align with our unified code representation.
 2. To further expand the diversity of MAS candidates, we also manually design some MAS systems, resulting in a base MAS pool comprising over 40 unique MAS designs
@@ -11,10 +11,11 @@
 - MAS-GPT backbone: `Qwen2.5-Coder-32B-Instruct` 사용 (to leveraging instruction-following, coding capabilities)
 - 단, 자원부족으로 인해 실습은 `meta-llama/Meta-Llama-3.1-8B-Instruct` 사용
 출처: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
-### 2026.03.10
+## 2026.03.10
 - MAS-GPT github 주소에 `template.py` 기반으로 간단한 MAS python snippet 생성 파이프라인 구축
-### 2026.03.12
-- `max_new_tokens`의 크기가 충분하지 않아 출력이 중간에 끊기는 현상 발생 `40 -> 200 -> 2000`으로 변경
+## 2026.03.12
+- `max_new_tokens`의 크기가 충분하지 않아 출력이 중간에 끊기는 현상 발생
+`40 -> 200 -> 2000`으로 변경
 - `max_new_tokens = 200`
 ```python
 from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
@@ -135,3 +136,5 @@ def execute_code(code):
 
 # Note that these functions are placeholders and should be implemented correctly to provide the necessary functionality for the multi-agent system.
 ```
+### 다음에 할 일
+- 다른 모델 사용해보기 (코딩 특화): `Qwen/Qwen2.5-Coder-14B-Instruct`
