@@ -1,5 +1,5 @@
 # MAS-GPT practice
-- 출처: ttps://arxiv.org/abs/2503.03686
+- 출처: https://arxiv.org/abs/2503.03686
 
 ### 2026.03.09
 - 논문에서 나온 내용중 구현에 참고할 내용들을 확인
