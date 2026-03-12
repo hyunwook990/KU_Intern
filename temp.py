@@ -2,8 +2,13 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 # Load model directly
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B-Instruct")
-model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3.1-8B-Instruct")
+model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16,
+    device_map="auto")
 
 
 SYSTEM_PROMPT = """You are an expert in generating multi-agent systems. You need to generate a proper multi-agent system described in Python code to solve the user query. The Python code should be able to take the user query as input and return the answer as output. The code should be able to run without any errors. Please make sure the code is well-structured and easy to understand.
@@ -32,11 +37,15 @@ class MAS():
 
 If you need to use other functions, you need to implement them by yourself in your returned code."""
 
+Query = """## Here is the user query:
+Find the degree for the given field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
+"""
+
 
 
 messages = [
     {"role": "system", "content": SYSTEM_PROMPT},
-    {"role": "user", "content": "Who are you?"},
+     {"role": "user", "content": "Generate Python code for a multi-agent system that solves: Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q."}
 ]
 inputs = tokenizer.apply_chat_template(
 	messages,
@@ -45,6 +54,14 @@ inputs = tokenizer.apply_chat_template(
 	return_dict=True,
 	return_tensors="pt",
 ).to(model.device)
+print(inputs)
 
-outputs = model.generate(**inputs, max_new_tokens=40)
-print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
+outputs = model.generate(
+    **inputs, # inputs가 dict 형식으로 반환되기 때문에
+    max_new_tokens=200,
+    pad_token_id=tokenizer.eos_token_id,  # pad token이 없는 모델이 있을 수 있기때문
+    do_sample=False # 가장 확률이 높은 토큰만 사용
+    )
+generated_ids = outputs[0][inputs["input_ids"].shape[-1]:]
+print("generated token count:", len(generated_ids))
+print(tokenizer.decode(generated_ids, skip_special_tokens=True))
