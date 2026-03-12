@@ -1,5 +1,5 @@
 # MAS-GPT practice
-- 출처: https://arxiv.org/abs/2503.03686
+- 논문 출처: https://arxiv.org/abs/2503.03686
 
 ### 2026.03.09
 - 논문에서 나온 내용중 구현에 참고할 내용들을 확인
@@ -7,8 +7,10 @@
 2. To further expand the diversity of MAS candidates, we also manually design some MAS systems, resulting in a base MAS pool comprising over 40 unique MAS designs
 3. Importantly, these 40+ MAS do not directly correspond to the exact number of MAS in the training dataset; rather, they serve as foundations that evolve during the query-MAS pair refinement process.
 - github `template.py`에 MAS pyhton code 생성 System prompt로 보이는 것을 발견
-- 데이터 생성: Llama-3-70B-Instruct 사용
-- MAS-GPT backbone: Qwen2.5-Coder-32B-Instruct 사용 (to leveraging instruction-following, coding capabilities)
+- 데이터 생성: `Llama-3-70B-Instruct` 사용
+- MAS-GPT backbone: `Qwen2.5-Coder-32B-Instruct` 사용 (to leveraging instruction-following, coding capabilities)
+- 단, 자원부족으로 인해 실습은 `meta-llama/Meta-Llama-3.1-8B-Instruct` 사용
+출처: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
 ### 2026.03.10
 - MAS-GPT github 주소에 `template.py` 기반으로 간단한 MAS python snippet 생성 파이프라인 구축
 ### 2026.03.12
