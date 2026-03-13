@@ -3,6 +3,8 @@ import torch
 # Load model directly
 
 model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# model_id = "meta-llama/CodeLlama-13b-hf" # chat_template 지원 안함
+# model_id = "Qwen/Qwen2.5-Coder-14B-Instruct" # Colab 추론시간이 너무 길다.
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
@@ -57,7 +59,7 @@ inputs = tokenizer.apply_chat_template(
 
 outputs = model.generate(
     **inputs, # inputs가 dict 형식으로 반환되기 때문에
-    max_new_tokens=200,
+    max_new_tokens=2000,
     pad_token_id=tokenizer.eos_token_id,  # pad token이 없는 모델이 있을 수 있기때문
     do_sample=False # 가장 확률이 높은 토큰만 사용
     )
