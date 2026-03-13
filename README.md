@@ -138,3 +138,11 @@ def execute_code(code):
 ```
 ### 다음에 할 일
 - 다른 모델 사용해보기 (코딩 특화): `Qwen/Qwen2.5-Coder-14B-Instruct`
+## 2026.03.13
+- `Qwen/Qwen2.5-Coder-14B-Instruct`모델로 코드 실행 시 아래와 같은 오류 발생
+```python
+# Google Colab T4로 런타임 유형 설정, 14B 모델이 VRAM에 전부 올라가지 않아서 CPU에 분산하여 로드한다는 경고 메세지
+WARNING:accelerate.big_modeling:Some parameters are on the meta device because they were offloaded to the disk and cpu.
+# do_sample = False라서 아래의 설정들을 사용하지 못한다는 경고 메세지
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set 'TRANSFORMERS_VERBOSITY=info' for more details.
+```
