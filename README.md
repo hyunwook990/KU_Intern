@@ -146,3 +146,6 @@ WARNING:accelerate.big_modeling:Some parameters are on the meta device because t
 # do_sample = False라서 아래의 설정들을 사용하지 못한다는 경고 메세지
 The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set 'TRANSFORMERS_VERBOSITY=info' for more details.
 ```
+## 2026.03.15
+- Colab에서 `Qwen/Qwen2.5-Coder-14B-Instruct`모델로 코드 실행 시 5시간동안 출력이 나오지 않아 8B 모델로 진행할 예정.
+- 8B 모델이 출력한 MAS 코드의 함수와 utils의 함수의 형태가 다른 것을 확인, 필요한 함수들만 `system prompt`로 제공하여 출력을 확인할 예정.
