@@ -149,3 +149,4 @@ The following generation flags are not valid and may be ignored: ['temperature',
 ## 2026.03.15
 - Colab에서 `Qwen/Qwen2.5-Coder-14B-Instruct`모델로 코드 실행 시 5시간동안 출력이 나오지 않아 8B 모델로 진행할 예정.
 - 8B 모델이 출력한 MAS 코드의 함수와 utils의 함수의 형태가 다른 것을 확인, 필요한 함수들만 `system prompt`로 제공하여 출력을 확인할 예정.
+- OOM(Out Of Memory) 오류 발생 -> 프롬프트를 너무 길게 제공해서 발생한 듯 함.
