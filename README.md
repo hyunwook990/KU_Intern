@@ -152,3 +152,4 @@ The following generation flags are not valid and may be ignored: ['temperature',
 - OOM(Out Of Memory) 오류 발생 -> 프롬프트를 너무 길게 제공해서 발생한 듯 함.
 ## 2026.03.16
 - RAG를 활용하여 utils의 함수들을 제공하는 방법을 사용할 예정.
+- `test_MAS.py`파일 실행 후, `output = Empty code. No output.` 출력 확인.
