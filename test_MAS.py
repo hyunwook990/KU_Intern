@@ -1,13 +1,12 @@
 from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
-import dotenv
-import os
+# import dotenv
+# import os
 
-# from google.colab import userdata
+# api_key = os.environ.get("OPENAI")
+# dotenv.load_dotenv('.env')
 
-# # 저장한 Name으로 키값 가져오기
-# api_key = userdata.get('OPENAI')
-dotenv.load_dotenv('.env')
-api_key = os.environ.get("OPENAI")
+from google.colab import userdata
+api_key = userdata.get('OPENAI')
 
 class MAS():
     def __init__(self, model_list):
@@ -16,7 +15,7 @@ class MAS():
     def forward(self, taskInfo):
         # Define the task
         task = "Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q"
-
+        print("\n", taskInfo, "\n")
         # Get the function signature
         function_signature = get_function_signature(self.llm, taskInfo)
 
@@ -26,6 +25,8 @@ class MAS():
         # Generate the code
         prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
         response, code = generate_and_extract_code(self.llm, prompt, temperature=0.7)
+        print("\n", response, "\n")
+        print("\n", code, "\n")
 
         # Execute the code
         try:
