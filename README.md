@@ -155,3 +155,4 @@ The following generation flags are not valid and may be ignored: ['temperature',
 ### 오류
 - `test_MAS.py`파일 실행 후, `output = Empty code. No output.` 출력 확인.
 - `execute_code` 함수에 code가 제공되지 않은 것으로 확인.
+- `response`에 답변이 나오고 `code=""`로 return 되었기에 이런 문제가 발생함. -> `extract_code_solution` 함수에서 제대로 처리가 안되는 듯함.
