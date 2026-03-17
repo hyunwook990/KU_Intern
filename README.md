@@ -177,6 +177,10 @@ The following generation flags are not valid and may be ignored: ['temperature',
 ## 2026.03.17
 ### 오류 확인
 - `generate_and_extract_code`의 `llm_response`가 아래와 같이 출력되며, `extract_code_solution`에서 코드 추출을 제대로 수행하지 못하는 듯함.
+
+<details>
+<summary> llm_response 출력 </summary>
+<div>
  To find the degree of the field extension \( \mathbb{Q}(\sqrt{2}, \sqrt{3}, \sqrt{18}) \) over \( \mathbb{Q} \), we need to determine the minimal polynomials of the elements involved and how they contribute to the degree of the extension.
 
 1. **Identify the elements**: 
@@ -216,3 +220,6 @@ print(field_extension_degree())
 ```
 
 When you run this function, it will return the degree of the field extension \( \mathbb{Q}(\sqrt{2}, \sqrt{3}, \sqrt{18}) \) over \( \mathbb{Q} \), which is 4.
+
+</div>
+</details>
