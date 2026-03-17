@@ -223,3 +223,10 @@ When you run this function, it will return the degree of the field extension \( 
 
 </div>
 </details>
+
+### 문제점
+- 
+1. 현재 논문에서 사용한 모델보다 작은 모델을 사용하여 MAS snippet을 생성했기 때문에 Multi Agent System python code를 제대로 구현하지 못하는 것 같다.
+- 입력을 사용자 쿼리로 받고 출력을 정답으로 하는 코드를 제공하라고 prompt에 작성되어있는데 제대로 수행하지 못하는 것 같다.
+2. `utils`의 함수들을 모두 파악하지 못해서 LLM이 제대로 된 코드를 제공하지 못하는 것 같다.
+- 문제가 단순해서인지 몰라서 사용하지 못하는 것인지 모르겠지만 다양한 함수를 사용하지 않는 것 같다.
