@@ -20,7 +20,7 @@
 `40 -> 200 -> 2000`으로 변경
 
 <details>
-<summary> `max_new_tokens = 200` </summary>
+<summary> max_new_tokens = 200 출력 </summary>
 <div markdown="1">
 
 ```python
@@ -48,7 +48,10 @@ class MAS():
 </div>
 </details>
 
-- `max_new_tokens = 2000` (`generated tokens: 875`)
+<details>
+<summary> max_new_tokens = 2000 (generated tokens: 875) 출력 </summary>
+<div markdown="1">
+
 ```python
 from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
 
@@ -146,6 +149,9 @@ def execute_code(code):
 
 # Note that these functions are placeholders and should be implemented correctly to provide the necessary functionality for the multi-agent system.
 ```
+</div>
+</details>
+
 ### 다음에 할 일
 - 다른 모델 사용해보기 (코딩 특화): `Qwen/Qwen2.5-Coder-14B-Instruct`
 ## 2026.03.13
