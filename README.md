@@ -152,7 +152,50 @@ The following generation flags are not valid and may be ignored: ['temperature',
 - OOM(Out Of Memory) 오류 발생 -> 프롬프트를 너무 길게 제공해서 발생한 듯 함.
 ## 2026.03.16
 - RAG를 활용하여 utils의 함수들을 제공하는 방법을 사용할 예정.
-### 오류
+---
+### 오류 확인
 - `test_MAS.py`파일 실행 후, `output = Empty code. No output.` 출력 확인.
 - `execute_code` 함수에 code가 제공되지 않은 것으로 확인.
 - `response`에 답변이 나오고 `code=""`로 return 되었기에 이런 문제가 발생함. -> `extract_code_solution` 함수에서 제대로 처리가 안되는 듯함.
+## 2026.03.17
+### 오류 확인
+- `generate_and_extract_code`의 `llm_response`가 아래와 같이 출력되며, `extract_code_solution`에서 코드 추출을 제대로 수행하지 못하는 듯함.
+ To find the degree of the field extension \( \mathbb{Q}(\sqrt{2}, \sqrt{3}, \sqrt{18}) \) over \( \mathbb{Q} \), we need to determine the minimal polynomials of the elements involved and how they contribute to the degree of the extension.
+
+1. **Identify the elements**: 
+   - We have \( \sqrt{2} \), \( \sqrt{3} \), and \( \sqrt{18} \). Notably, \( \sqrt{18} = \sqrt{9 \cdot 2} = 3\sqrt{2} \).
+
+2. **Field extension construction**: 
+   - Start with \( \mathbb{Q} \).
+   - First, extend to \( \mathbb{Q}(\sqrt{2}) \).
+   - Then extend to \( \mathbb{Q}(\sqrt{2}, \sqrt{3}) \).
+   - Finally, check if \( \sqrt{18} \) introduces a new element or if it's already in the field.
+
+3. **Calculate the degree of each extension**:
+   - The degree of \( \mathbb{Q}(\sqrt{2}) \) over \( \mathbb{Q} \) is 2, since the minimal polynomial of \( \sqrt{2} \) over \( \mathbb{Q} \) is \( x^2 - 2 \).
+   - Next, \( \mathbb{Q}(\sqrt{2}, \sqrt{3}) \) is obtained by adjoining \( \sqrt{3} \) to \( \mathbb{Q}(\sqrt{2}) \). The minimal polynomial of \( \sqrt{3} \) over \( \mathbb{Q}(\sqrt{2}) \) is \( x^2 - 3 \), which is irreducible in \( \mathbb{Q}(\sqrt{2}) \), giving us a degree of 2 for this extension as well.
+   - Thus, the degree of \( \mathbb{Q}(\sqrt{2}, \sqrt{3}) \) over \( \mathbb{Q} \) is \( 2 \times 2 = 4 \).
+
+4. **Check the contribution of \( \sqrt{18} \)**:
+   - Since \( \sqrt{18} = 3\sqrt{2} \) is already in \( \mathbb{Q}(\sqrt{2}) \), it does not increase the degree of the field extension.
+
+5. **Final degree calculation**:
+   - Therefore, the degree of the extension \( \mathbb{Q}(\sqrt{2}, \sqrt{3}, \sqrt{18}) \) over \( \mathbb{Q} \) is 4.
+
+Now, we can implement this logic in a Python function:
+
+```python
+def field_extension_degree():
+    # The degree of Q(sqrt(2), sqrt(3), sqrt(18)) over Q
+    degree_sqrt2 = 2  # [Q(sqrt(2)):Q]
+    degree_sqrt3 = 2  # [Q(sqrt(2), sqrt(3)):Q(sqrt(2))]
+    degree_sqrt18 = 1 # [Q(sqrt(2), sqrt(3), sqrt(18)):Q(sqrt(2), sqrt(3))]
+
+    total_degree = degree_sqrt2 * degree_sqrt3 * degree_sqrt18
+    return total_degree
+
+# Call the function and print the result
+print(field_extension_degree())
+```
+
+When you run this function, it will return the degree of the field extension \( \mathbb{Q}(\sqrt{2}, \sqrt{3}, \sqrt{18}) \) over \( \mathbb{Q} \), which is 4.
