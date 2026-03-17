@@ -17,25 +17,63 @@ class MAS():
         task = "Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q"
         print("\n", taskInfo, "\n")
         # Get the function signature
-        function_signature = get_function_signature(self.llm, taskInfo)
+        function_signature = get_function_signature(self.llm, task)
 
         # Get the test cases
-        test_cases = get_test_cases(self.llm, taskInfo, function_signature)
+        test_cases = get_test_cases(self.llm, task, function_signature)
 
         # Generate the code
         # prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
+        # prompt = """
+        # Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
+        # The function should take no arguments and return the degree as an integer.
+        
+        # Return only Python code and do not include any explanation.
+        # The Python code should be able to take the query as input and return the answer as output.
+        # The code should be able to run without any errors.
+        # Please make sure the code is well-structured and easy to understand.
+        
+        # Wrap the entire code inside the following tags exactly:
+        
+        # <Code Solution>
+        # # your python code here
+        # </Code Solution>
+        # """
+        
+        # prompt = """
+        # Write Python code that solves the following task:
+        
+        # Task:
+        # Find the degree of the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
+        
+        # Requirements:
+        # 2. The function must take no arguments.
+        # 3. The function must return the degree as an integer.
+        # 4. Do not print anything.
+        # 5. Return only valid Python code.
+        # 6. Do not include any explanation, comments, or markdown.
+        # 7. Wrap the entire code exactly in the following tags:
+        
+        # <Code Solution>
+        # # your python code here
+        # </Code Solution>
+        # """
+        
         prompt = """
-        Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
-        The function should take no arguments and return the degree as an integer.
-        
-        Return only Python code and do not include any explanation.
-        
-        Wrap the entire code inside the following tags exactly:
-        
-        <Code Solution>
-        # your python code here
-        </Code Solution>
+        You are a helpful AI assistant tasked with extracting the final answer from a provided solution.
+        **Input:**
+        1. A problem statement, prefixed with ”===Problem: <problem>”.
+        2. A solution to the problem, prefixed with ”===Solution:<solution>”.
+        **Problem and Solution:**
+        ===Problem: {query}
+        ===Solution: {response}
+        **Instructions:**
+        - Carefully analyze the solution and extract the final answer in reply: ”The answer is <answer extracted> in reply”.
+        - If the solution does not contain a final answer (e.g., only reasoning, code without execution, or incomplete information), respond with: ”The reply doesn’t contain an answer.”
+        - Ensure that the extracted answer is exactly as presented in the solution. Do not infer or use external knowledge. Do not execute the code yourself.
+        - Remember, Never execute the code yourself! Never doing any computation yourself! Just extract and output the existing answer!
         """
+                
         response, code = generate_and_extract_code(self.llm, prompt, temperature=0.7)
         print("\n", response, "\n")
         print("\n", code, "\n")
