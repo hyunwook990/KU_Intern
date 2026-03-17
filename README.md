@@ -20,32 +20,30 @@
 `40 -> 200 -> 2000`으로 변경
 
 <detils>
-<summary> `max_new_tokens = 200` </summary>
-<div markdown="1">
+    <summary> `max_new_tokens = 200` </summary>
+    <div markdown="1">
+        ```python
+        from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
 
-```python
-from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
+        class MAS():
+            def __init__(self, model_list):
+                self.llm = LLM(model_list)
 
-class MAS():
-    def __init__(self, model_list):
-        self.llm = LLM(model_list)
+            def forward(self, taskInfo):
+                # Define the task
+                task = "Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q"
 
-    def forward(self, taskInfo):
-        # Define the task
-        task = "Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q"
+                # Get the function signature
+                function_signature = get_function_signature(self.llm, taskInfo)
 
-        # Get the function signature
-        function_signature = get_function_signature(self.llm, taskInfo)
+                # Get the test cases
+                test_cases = get_test_cases(self.llm, taskInfo, function_signature)
 
-        # Get the test cases
-        test_cases = get_test_cases(self.llm, taskInfo, function_signature)
-
-        # Generate the code
-        prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
-        response, code = generate_and_extract_code(self.ll
-```
-
-</div>
+                # Generate the code
+                prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
+                response, code = generate_and_extract_code(self.ll
+        ```
+    </div>
 </details>
 
 - `max_new_tokens = 2000` (`generated tokens: 875`)
