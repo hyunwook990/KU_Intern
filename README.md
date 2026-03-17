@@ -19,31 +19,33 @@
 - `max_new_tokens`의 크기가 충분하지 않아 출력이 중간에 끊기는 현상 발생
 `40 -> 200 -> 2000`으로 변경
 
-<detils>
-    <summary> `max_new_tokens = 200` </summary>
-    <div markdown="1">
-        ```python
-        from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
+<details>
+<summary> `max_new_tokens = 200` </summary>
+<div markdown="1">
 
-        class MAS():
-            def __init__(self, model_list):
-                self.llm = LLM(model_list)
+```python
+from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
 
-            def forward(self, taskInfo):
-                # Define the task
-                task = "Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q"
+class MAS():
+    def __init__(self, model_list):
+        self.llm = LLM(model_list)
 
-                # Get the function signature
-                function_signature = get_function_signature(self.llm, taskInfo)
+    def forward(self, taskInfo):
+        # Define the task
+        task = "Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q"
 
-                # Get the test cases
-                test_cases = get_test_cases(self.llm, taskInfo, function_signature)
+        # Get the function signature
+        function_signature = get_function_signature(self.llm, taskInfo)
 
-                # Generate the code
-                prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
-                response, code = generate_and_extract_code(self.ll
-        ```
-    </div>
+        # Get the test cases
+        test_cases = get_test_cases(self.llm, taskInfo, function_signature)
+
+        # Generate the code
+        prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
+        response, code = generate_and_extract_code(self.ll
+```
+
+</div>
 </details>
 
 - `max_new_tokens = 2000` (`generated tokens: 875`)
