@@ -1,7 +1,7 @@
 # MAS-GPT practice
 - 논문 출처: https://arxiv.org/abs/2503.03686
-
-## 2026.03.09
+---
+# 2026.03.09
 - 논문에서 나온 내용중 구현에 참고할 내용들을 확인
 1. Following this framework, we first re-implement several existing MAS methods (e.g., Multi-Agent Debate (Duet al., 2024), Self-Consistency (Wang et al., 2024b), Self-Refine (Madaan et al., 2024)) to align with our unified code representation.
 2. To further expand the diversity of MAS candidates, we also manually design some MAS systems, resulting in a base MAS pool comprising over 40 unique MAS designs
@@ -11,12 +11,17 @@
 - MAS-GPT backbone: `Qwen2.5-Coder-32B-Instruct` 사용 (to leveraging instruction-following, coding capabilities)
 - 단, 자원부족으로 인해 실습은 `meta-llama/Meta-Llama-3.1-8B-Instruct` 사용
 출처: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
-## 2026.03.10
+---
+# 2026.03.10
 - MAS-GPT github 주소에 `template.py` 기반으로 간단한 MAS python snippet 생성 파이프라인 구축
-## 2026.03.12
+---
+# 2026.03.12
 - `max_new_tokens`의 크기가 충분하지 않아 출력이 중간에 끊기는 현상 발생
 `40 -> 200 -> 2000`으로 변경
-- `max_new_tokens = 200`
+<detils>
+<summary> `max_new_tokens = 200` </summary>
+<div markdown="1">
+
 ```python
 from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
 
@@ -38,6 +43,10 @@ class MAS():
         prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
         response, code = generate_and_extract_code(self.ll
 ```
+
+</div>
+</details>
+
 - `max_new_tokens = 2000` (`generated tokens: 875`)
 ```python
 from utils import LLM, execute_code, test_code_get_feedback, get_function_signature, get_test_cases, extract_code_solution, generate_and_extract_code
@@ -146,13 +155,14 @@ WARNING:accelerate.big_modeling:Some parameters are on the meta device because t
 # do_sample = False라서 아래의 설정들을 사용하지 못한다는 경고 메세지
 The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set 'TRANSFORMERS_VERBOSITY=info' for more details.
 ```
+---
 ## 2026.03.15
 - Colab에서 `Qwen/Qwen2.5-Coder-14B-Instruct`모델로 코드 실행 시 5시간동안 출력이 나오지 않아 8B 모델로 진행할 예정.
 - 8B 모델이 출력한 MAS 코드의 함수와 utils의 함수의 형태가 다른 것을 확인, 필요한 함수들만 `system prompt`로 제공하여 출력을 확인할 예정.
 - OOM(Out Of Memory) 오류 발생 -> 프롬프트를 너무 길게 제공해서 발생한 듯 함.
+---
 ## 2026.03.16
 - RAG를 활용하여 utils의 함수들을 제공하는 방법을 사용할 예정.
----
 ### 오류 확인
 - `test_MAS.py`파일 실행 후, `output = Empty code. No output.` 출력 확인.
 - `execute_code` 함수에 code가 제공되지 않은 것으로 확인.
