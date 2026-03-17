@@ -23,7 +23,19 @@ class MAS():
         test_cases = get_test_cases(self.llm, taskInfo, function_signature)
 
         # Generate the code
-        prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
+        # prompt = f"Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q. The function should take no arguments."
+        prompt = """
+        Write a Python function to find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
+        The function should take no arguments and return the degree as an integer.
+        
+        Return only Python code and do not include any explanation.
+        
+        Wrap the entire code inside the following tags exactly:
+        
+        <Code Solution>
+        # your python code here
+        </Code Solution>
+        """
         response, code = generate_and_extract_code(self.llm, prompt, temperature=0.7)
         print("\n", response, "\n")
         print("\n", code, "\n")
