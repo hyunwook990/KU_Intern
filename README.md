@@ -18,6 +18,7 @@
 # 2026.03.12
 - `max_new_tokens`의 크기가 충분하지 않아 출력이 중간에 끊기는 현상 발생
 `40 -> 200 -> 2000`으로 변경
+
 <detils>
 <summary> `max_new_tokens = 200` </summary>
 <div markdown="1">
