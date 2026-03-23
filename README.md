@@ -233,3 +233,82 @@ When you run this function, it will return the degree of the field extension \( 
 
 # 2026.03.23
 - 논문 github에 있는 `template.py`의 형식을 똑같이 따라하기위해 instruction 수정 후, MAS python 코드 재출력 시도
+<details>
+<summary>MAS 코드 출력</summary>
+<div>
+generated token count: 653
+It seems like you haven't provided any specific query or problem to solve using a multi-agent system. However, I can provide a basic example of a multi-agent system in Python that can be used to solve a variety of problems.
+
+Let's consider a simple problem where we have multiple agents that need to work together to find the shortest path in a grid world. We can use a multi-agent system to model this problem.
+
+```python
+from utils import *
+import random
+
+class Agent():
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+class GridWorld():
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.agents = []
+
+    def add_agent(self, agent):
+        self.agents.append(agent)
+
+    def get_neighbors(self, x, y):
+        neighbors = []
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.width and 0 <= ny < self.height:
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def find_shortest_path(self, start, end):
+        queue = [(start, [start])]
+        visited = set()
+        while queue:
+            (x, y), path = queue.pop(0)
+            if (x, y) == end:
+                return path
+            for nx, ny in self.get_neighbors(x, y):
+                if (nx, ny) not in visited:
+                    visited.add((nx, ny))
+                    queue.append(((nx, ny), path + [(nx, ny)]))
+        return None
+
+class MAS():
+    def __init__(self, grid_world):
+        self.grid_world = grid_world
+
+    def forward(self, taskInfo):
+        # Find the shortest path for each agent
+        for agent in self.grid_world.agents:
+            start = (agent.x, agent.y)
+            end = (random.randint(0, self.grid_world.width - 1), random.randint(0, self.grid_world.height - 1))
+            path = self.grid_world.find_shortest_path(start, end)
+            print(f"Agent at ({agent.x}, {agent.y}) found path: {path}")
+
+# Create a grid world
+grid_world = GridWorld(10, 10)
+
+# Add agents to the grid world
+for i in range(5):
+    agent = Agent(random.randint(0, 9), random.randint(0, 9))
+    grid_world.add_agent(agent)
+
+# Create a multi-agent system
+mas = MAS(grid_world)
+
+# Run the multi-agent system
+mas.forward("Find the shortest path for each agent")
+```
+
+This code defines a simple multi-agent system where each agent is a point in a grid world. The `MAS` class represents the multi-agent system, and it uses the `GridWorld` class to find the shortest path for each agent. The `Agent` class represents an individual agent.
+
+You can modify this code to fit your specific problem and requirements.
+</div>
+</details>
