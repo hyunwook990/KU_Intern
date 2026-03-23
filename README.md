@@ -154,7 +154,7 @@ def execute_code(code):
 
 ### 다음에 할 일
 - 다른 모델 사용해보기 (코딩 특화): `Qwen/Qwen2.5-Coder-14B-Instruct`
-## 2026.03.13
+# 2026.03.13
 - `Qwen/Qwen2.5-Coder-14B-Instruct`모델로 코드 실행 시 아래와 같은 오류 발생
 ```python
 # Google Colab T4로 런타임 유형 설정, 14B 모델이 VRAM에 전부 올라가지 않아서 CPU에 분산하여 로드한다는 경고 메세지
@@ -163,18 +163,18 @@ WARNING:accelerate.big_modeling:Some parameters are on the meta device because t
 The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set 'TRANSFORMERS_VERBOSITY=info' for more details.
 ```
 ---
-## 2026.03.15
+# 2026.03.15
 - Colab에서 `Qwen/Qwen2.5-Coder-14B-Instruct`모델로 코드 실행 시 5시간동안 출력이 나오지 않아 8B 모델로 진행할 예정.
 - 8B 모델이 출력한 MAS 코드의 함수와 utils의 함수의 형태가 다른 것을 확인, 필요한 함수들만 `system prompt`로 제공하여 출력을 확인할 예정.
 - OOM(Out Of Memory) 오류 발생 -> 프롬프트를 너무 길게 제공해서 발생한 듯 함.
 ---
-## 2026.03.16
+# 2026.03.16
 - RAG를 활용하여 utils의 함수들을 제공하는 방법을 사용할 예정.
 ### 오류 확인
 - `test_MAS.py`파일 실행 후, `output = Empty code. No output.` 출력 확인.
 - `execute_code` 함수에 code가 제공되지 않은 것으로 확인.
 - `response`에 답변이 나오고 `code=""`로 return 되었기에 이런 문제가 발생함. -> `extract_code_solution` 함수에서 제대로 처리가 안되는 듯함.
-## 2026.03.17
+# 2026.03.17
 ### 오류 확인
 - `generate_and_extract_code`의 `llm_response`가 아래와 같이 출력되며, `extract_code_solution`에서 코드 추출을 제대로 수행하지 못하는 듯함.
 
@@ -230,3 +230,6 @@ When you run this function, it will return the degree of the field extension \( 
 - 입력을 사용자 쿼리로 받고 출력을 정답으로 하는 코드를 제공하라고 prompt에 작성되어있는데 제대로 수행하지 못하는 것 같다.
 2. `utils`의 함수들을 모두 파악하지 못해서 LLM이 제대로 된 코드를 제공하지 못하는 것 같다.
 - 문제가 단순해서인지 몰라서 사용하지 못하는 것인지 모르겠지만 다양한 함수를 사용하지 않는 것 같다.
+
+# 2026.03.23
+- 논문 github에 있는 `template.py`의 형식을 똑같이 따라하기위해 instruction 수정 후, MAS python 코드 재출력 시도
