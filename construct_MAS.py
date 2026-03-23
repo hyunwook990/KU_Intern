@@ -12,6 +12,21 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16,
     device_map="auto")
 
+def form_instruction(query):
+    instruction = "I will give a user query and a code template for multi-agent system. You need to generate a proper multi-agent system described in Python code to solve the query. The Python code should be able to take the query as input and return the answer as output. The code should be able to run without any errors. Please make sure the code is well-structured and easy to understand.\n\n"
+    instruction += f"Here is the user query: {query}\n\n"
+    instruction += "Here is the code template:\n\n"
+    instruction += '''```python
+from utils import *
+
+class MAS():
+    def __init__(self, model_list):
+        self.llm = LLM(model_list)
+
+    def forward(self, taskInfo):
+        pass
+        return
+```'''
 
 SYSTEM_PROMPT = """You are an expert in generating multi-agent systems. You need to generate a proper multi-agent system described in Python code to solve the user query. The Python code should be able to take the user query as input and return the answer as output. The code should be able to run without any errors. Please make sure the code is well-structured and easy to understand.
 
@@ -39,15 +54,15 @@ class MAS():
 
 If you need to use other functions, you need to implement them by yourself in your returned code."""
 
-Query = """## Here is the user query:
-Find the degree for the given field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
-"""
+Query = str(input())
+
+instruction = form_instruction(Query)
 
 
 
 messages = [
     {"role": "system", "content": SYSTEM_PROMPT},
-     {"role": "user", "content": "Generate Python code for a multi-agent system that solves: Find the degree for the field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q."}
+     {"role": "user", "content": instruction}
 ]
 inputs = tokenizer.apply_chat_template(
 	messages,
