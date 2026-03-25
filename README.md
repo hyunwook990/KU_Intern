@@ -526,8 +526,7 @@ You can modify this code to fit your specific problem and requirements.
 </details>
 
 ## 문제
-- 1번의 경우 제공한 프롬프트에 작성된 `utils`의 `generate_and_extract_code`와 `execute_code`함수를 보고 코딩 문제로 판단하여 코드 에이전트를 제공하게 되면서 오류가 발생
-
+1. 1번의 경우 제공한 프롬프트에 작성된 `utils`의 `generate_and_extract_code`와 `execute_code`함수를 보고 코딩 문제로 판단하여 코드 에이전트를 제공하게 되면서 오류가 발생
 
 <details>
 <summary>이후 수정하여 받은 MAS python snippet</summary>
@@ -583,4 +582,5 @@ class MAS():
 </div>
 </details>
 
-- 현재까지의 출력에서 코딩 에이전트가 들어가게되면 출력이 잘 나오지 않았음, 코딩문제 MAS를 생성하려면 주의가 필요함
+2. 현재까지의 출력에서 코딩 에이전트가 들어가게되면 출력이 잘 나오지 않았음, 코딩문제 MAS를 생성하려면 주의가 필요함
+3. 2번에서 작성한 MAS python snippet의 경우에는 제공한 문제와 전혀 다른 문제를 해결하는 코드를 제공함
