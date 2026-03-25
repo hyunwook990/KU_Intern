@@ -23,10 +23,28 @@ class MAS():
     def __init__(self, model_list):
         self.llm = LLM(model_list)
 
-    def forward(self, taskInfo):
-        pass
-        return
+    def forward(query):
+      math_agent = f'You are a math expert. Solve this question: {query}
+      math_output = call_llm(math_agent)
+
+      feedback_agent = f'Given {query} and {math_output}, provide feedback
+      feedback_output = call_llm(feedback_agent)
+
+      refine_agent = f'Given {query}, {math_output} and {feedback_output}, provide the final answer
+
+      return call_llm(refine_agent)
 ```'''
+#     instruction += '''```python
+# from utils import *
+
+# class MAS():
+#     def __init__(self, model_list):
+#         self.llm = LLM(model_list)
+
+#     def forward(self, taskInfo):
+#         pass
+#         return
+# ```'''
 
 SYSTEM_PROMPT = """You are an expert in generating multi-agent systems. You need to generate a proper multi-agent system described in Python code to solve the user query. The Python code should be able to take the user query as input and return the answer as output. The code should be able to run without any errors. Please make sure the code is well-structured and easy to understand.
 
