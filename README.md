@@ -316,4 +316,211 @@ You can modify this code to fit your specific problem and requirements.
 # 2026.03.25
 - MAS 코드가 원하는 수준으로 나오지 않는 이유를 찾기 위해 다음 두가지를 수행할 예정이다.
 1. ChatGPT에 프롬프트를 제공, 출력되는 코드를 확인
+<details>
+<summary>출력</summary>
+<div>
+
+```python
+from utils import *
+
+class PlannerAgent:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def make_function_signature(self, taskInfo):
+        return get_function_signature(self.llm, taskInfo)
+
+
+class CoderAgent:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def make_code(self, taskInfo, function_signature):
+        prompt = (
+            "You are a careful Python mathematician.\n\n"
+            "Solve the following user task by writing correct Python code.\n\n"
+            "User task:\n"
+            f"{taskInfo}\n\n"
+            "Required function signature:\n"
+            f"{function_signature}\n\n"
+            "Requirements:\n"
+            "1. Return only one complete Python solution wrapped in "
+            "<Code Solution> and </Code Solution>.\n"
+            "2. The code must be executable without errors.\n"
+            "3. The code should define the required function.\n"
+            "4. The code should compute the answer for the math problem exactly.\n"
+            "5. Include a small runnable snippet at the bottom that prints the final answer.\n"
+        )
+        response, code = generate_and_extract_code(self.llm, prompt, temperature=0.2)
+        return response, code
+
+
+class TesterAgent:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def make_test_cases(self, taskInfo, function_signature):
+        return get_test_cases(self.llm, taskInfo, function_signature)
+
+    def test_code(self, code, test_cases):
+        return test_code_get_feedback(code, test_cases)
+
+
+class DebugAgent:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def fix_code(self, taskInfo, function_signature, old_code, feedback):
+        prompt = (
+            "You are fixing Python code.\n\n"
+            "User task:\n"
+            f"{taskInfo}\n\n"
+            "Required function signature:\n"
+            f"{function_signature}\n\n"
+            "Previous code:\n"
+            f"{old_code}\n\n"
+            "Test feedback:\n"
+            f"{feedback}\n\n"
+            "Please repair the code so that:\n"
+            "1. It satisfies the task.\n"
+            "2. It matches the required function signature.\n"
+            "3. It executes without errors.\n"
+            "4. It prints the final answer for the given task.\n\n"
+            "Return only the corrected code wrapped in "
+            "<Code Solution> and </Code Solution>.\n"
+        )
+        response, code = generate_and_extract_code(self.llm, prompt, temperature=0.1)
+        return response, code
+
+
+class SolverAgent:
+    def run_code(self, code):
+        return execute_code(code)
+
+
+class MAS:
+    def __init__(self, model_list):
+        self.llm = LLM(model_list)
+        self.planner = PlannerAgent(self.llm)
+        self.coder = CoderAgent(self.llm)
+        self.tester = TesterAgent(self.llm)
+        self.debugger = DebugAgent(self.llm)
+        self.solver = SolverAgent()
+
+    def forward(self, taskInfo):
+        function_signature = self.planner.make_function_signature(taskInfo)
+        test_cases = self.tester.make_test_cases(taskInfo, function_signature)
+        _, code = self.coder.make_code(taskInfo, function_signature)
+        feedback = self.tester.test_code(code, test_cases)
+
+        max_retry = 2
+        retry = 0
+
+        while retry < max_retry:
+            feedback_str = str(feedback).lower()
+
+            passed = (
+                ("pass" in feedback_str or "all tests passed" in feedback_str)
+                and ("fail" not in feedback_str)
+                and ("error" not in feedback_str)
+            )
+
+            if passed:
+                break
+
+            _, code = self.debugger.fix_code(
+                taskInfo=taskInfo,
+                function_signature=function_signature,
+                old_code=code,
+                feedback=feedback,
+            )
+            feedback = self.tester.test_code(code, test_cases)
+            retry += 1
+
+        final_output = self.solver.run_code(code)
+        return final_output
+```
+</div>
+</details>
+
 2. `instruction`에 논문에 나온 코드를 제공, one-shot 효과를 기대
+
+<details>
+<summary>출력</summary>
+<div>
+generated token count: 653
+It seems like you haven't provided any specific query or problem to solve using a multi-agent system. However, I can provide a basic example of a multi-agent system in Python that can be used to solve a variety of problems.
+
+Let's consider a simple problem where we have multiple agents that need to work together to find the shortest path in a grid world. We can use a multi-agent system to model this problem.
+
+```python
+from utils import *
+import random
+
+class Agent():
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+class GridWorld():
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.agents = []
+
+    def add_agent(self, agent):
+        self.agents.append(agent)
+
+    def get_neighbors(self, x, y):
+        neighbors = []
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.width and 0 <= ny < self.height:
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def find_shortest_path(self, start, end):
+        queue = [(start, [start])]
+        visited = set()
+        while queue:
+            (x, y), path = queue.pop(0)
+            if (x, y) == end:
+                return path
+            for nx, ny in self.get_neighbors(x, y):
+                if (nx, ny) not in visited:
+                    visited.add((nx, ny))
+                    queue.append(((nx, ny), path + [(nx, ny)]))
+        return None
+
+class MAS():
+    def __init__(self, grid_world):
+        self.grid_world = grid_world
+
+    def forward(self, taskInfo):
+        # Find the shortest path for each agent
+        for agent in self.grid_world.agents:
+            start = (agent.x, agent.y)
+            end = (random.randint(0, self.grid_world.width - 1), random.randint(0, self.grid_world.height - 1))
+            path = self.grid_world.find_shortest_path(start, end)
+            print(f"Agent at ({agent.x}, {agent.y}) found path: {path}")
+
+# Create a grid world
+grid_world = GridWorld(10, 10)
+
+# Add agents to the grid world
+for i in range(5):
+    agent = Agent(random.randint(0, 9), random.randint(0, 9))
+    grid_world.add_agent(agent)
+
+# Create a multi-agent system
+mas = MAS(grid_world)
+
+# Run the multi-agent system
+mas.forward("Find the shortest path for each agent")
+```
+
+This code defines a simple multi-agent system where each agent is a point in a grid world. The `MAS` class represents the multi-agent system, and it uses the `GridWorld` class to find the shortest path for each agent. The `Agent` class represents an individual agent.
+
+You can modify this code to fit your specific problem and requirements.
+</div>
+</details>
