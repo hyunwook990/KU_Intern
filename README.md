@@ -524,3 +524,63 @@ This code defines a simple multi-agent system where each agent is a point in a g
 You can modify this code to fit your specific problem and requirements.
 </div>
 </details>
+
+## 문제
+- 1번의 경우 제공한 프롬프트에 작성된 `utils`의 `generate_and_extract_code`와 `execute_code`함수를 보고 코딩 문제로 판단하여 코드 에이전트를 제공하게 되면서 오류가 발생
+
+
+<details>
+<summary>이후 수정하여 받은 MAS python snippet</summary>
+<div>
+
+```python
+
+from utils import *
+
+class MAS():
+    def __init__(self, model_list):
+        self.llm = LLM(model_list)
+
+    def call_llm(self, prompt):
+        response, _ = generate_and_extract_code(self.llm, prompt)
+        return response
+
+    def forward(self, query):
+
+        # 1️⃣ math agent
+        math_prompt = (
+            "You are a math expert.\n"
+            "Solve the following problem step by step:\n"
+            f"{query}"
+        )
+        math_output = self.call_llm(math_prompt)
+
+        # 2️⃣ feedback agent
+        feedback_prompt = (
+            "You are a strict reviewer.\n"
+            "Check the correctness of the solution.\n"
+            f"Problem: {query}\n"
+            f"Solution: {math_output}\n"
+            "If wrong, explain why."
+        )
+        feedback_output = self.call_llm(feedback_prompt)
+
+        # 3️⃣ refine agent
+        refine_prompt = (
+            "You are a math expert.\n"
+            "Given the problem, solution, and feedback,\n"
+            "provide the correct final answer.\n\n"
+            f"Problem: {query}\n"
+            f"Solution: {math_output}\n"
+            f"Feedback: {feedback_output}\n"
+            "Give only the final answer."
+        )
+        final_output = self.call_llm(refine_prompt)
+
+        return final_output
+```
+
+</div>
+</details>
+
+- 현재까지의 출력에서 코딩 에이전트가 들어가게되면 출력이 잘 나오지 않았음, 코딩문제 MAS를 생성하려면 주의가 필요함
