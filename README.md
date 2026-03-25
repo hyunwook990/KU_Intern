@@ -312,3 +312,8 @@ This code defines a simple multi-agent system where each agent is a point in a g
 You can modify this code to fit your specific problem and requirements.
 </div>
 </details>
+
+# 2026.03.25
+- MAS 코드가 원하는 수준으로 나오지 않는 이유를 찾기 위해 다음 두가지를 수행할 예정이다.
+1. ChatGPT에 프롬프트를 제공, 출력되는 코드를 확인
+2. `instruction`에 논문에 나온 코드를 제공, one-shot 효과를 기대
