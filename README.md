@@ -1,5 +1,6 @@
 # MAS-GPT practice
-- 논문 출처: https://arxiv.org/abs/2503.03686
+- 논문 출처: https://aclanthology.org/2023.emnlp-main.273/
+- github 주소: https://github.com/MASWorks/MAS-GPT
 ---
 # 2026.03.09
 - 논문에서 나온 내용중 구현에 참고할 내용들을 확인
