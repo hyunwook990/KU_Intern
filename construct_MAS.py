@@ -34,6 +34,8 @@ class MAS():
 
       return call_llm(refine_agent)
 ```'''
+    return instruction
+
 #     instruction += '''```python
 # from utils import *
 
