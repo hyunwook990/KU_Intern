@@ -53,6 +53,9 @@ print(mas.forward(query))
 ###################################################################
 ###################################################################
 ###################################################################
+###################################################################
+###################################################################
+###################################################################
 
 # github에 있던 for_instruction에 논문에 나온 code 예시를 code example로 추가해서 출력
 # generated token count: 519
@@ -100,3 +103,79 @@ answer = mas.forward(query)
 print(answer)
 
 # This will output the index of the permutation in the set.
+
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+
+# generated token count: 600
+# To solve the user query, we need to implement the `forward` method in the `MAS` class. This method will take the task information as input, process it, and return the result.
+
+# Here's the updated code:
+
+from utils import *
+
+class MAS():
+    def __init__(self, model_list):
+        self.llm = LLM(model_list)
+
+    def forward(self, taskInfo):
+        # Parse the task information
+        permutaions = taskInfo['permutations']
+        cycle_notation = taskInfo['cycle_notation']
+        group = taskInfo['group']
+
+        # Check if the permutations are valid
+        if len(permutaions)!= len(cycle_notation):
+            return "Invalid permutations"
+
+        # Check if the cycle notation is valid
+        for cycle in cycle_notation:
+            if len(cycle) == 0:
+                return "Invalid cycle notation"
+
+        # Check if the group is valid
+        if group!= 'S_5':
+            return "Invalid group"
+
+        # Generate the permutation
+        p = self.generate_permutation(permutaions, cycle_notation)
+
+        # Find the index of p in S_5
+        index = self.find_index(p, group)
+
+        return index
+
+    def generate_permutation(self, permutaions, cycle_notation):
+        # This function generates the permutation from the given cycle notation
+        permutation = [0] * len(permutaions)
+        for cycle in cycle_notation:
+            for i in cycle:
+                permutation[i-1] = permutaions[i-1]
+        return permutation
+
+    def find_index(self, p, group):
+        # This function finds the index of the permutation p in the group S_5
+        # For simplicity, we assume that the index is the lexicographic order of the permutation
+        index = 0
+        for i in range(len(p)):
+            index = index * 5 + p[i]
+        return index
+
+# Example usage
+taskInfo = {
+    'permutations': [1, 2, 5, 4, 3],
+    'cycle_notation': [(1, 2, 5, 4), (2, 3)],
+    'group': 'S_5'
+}
+
+mas = MAS(['model1','model2'])
+index = mas.forward(taskInfo)
+print(index)
+
+# This code defines a `MAS` class that takes a list of models in its constructor. The `forward` method takes a task information dictionary as input, processes it, and returns the result. The `generate_permutation` method generates the permutation from the given cycle notation, and the `find_index` method finds the index of the permutation in the group S_5.
+
+# Note that this is a simplified implementation and may not cover all edge cases. You may need to modify it to fit your specific requirements.
