@@ -1,3 +1,4 @@
+# 문제: Let p = (1, 2, 5, 4)(2, 3) in S_5 . Find the index of <p> in S_5.
 # code template으로 논문에 나온 코드를 제공해서 출력
 # generated token count: 725
 # To solve the user query, we need to implement the `call_llm` function and the `LLM` class. We also need to implement the `get_permutations` function to generate all permutations of a given list.
@@ -5,6 +6,8 @@
 # Here is the Python code that implements the multi-agent system:
 from utils import *
 import itertools
+from google.colab import userdata
+api_key = userdata.get('OPENAI')
 
 class LLM:
     def __init__(self, model_list):
@@ -24,13 +27,13 @@ class MAS():
 
     def forward(self, query):
         math_agent = f'You are a math expert. Solve this question: {query}. Find the index of the permutation (1, 2, 5, 4)(2, 3) in the list of all permutations of (1, 2, 3, 4, 5)'
-        math_output = self.llm.call(math_agent)
+        math_output = self.llm.call_llm(math_agent)
         
         feedback_agent = f'Given {query} and {math_output}, provide feedback'
-        feedback_output = self.llm.call(feedback_agent)
+        feedback_output = self.llm.call_llm(feedback_agent)
         
         refine_agent = f'Given {query}, {math_output} and {feedback_output}, provide the final answer'
-        refine_output = self.llm.call(refine_agent)
+        refine_output = self.llm.call_llm(refine_agent)
         
         # Generate all permutations of (1, 2, 3, 4, 5)
         permutations = self.get_permutations([1, 2, 3, 4, 5])
@@ -42,9 +45,13 @@ class MAS():
         return index
 
 # Test the MAS
-mas = MAS(["model1", "model2"])
+mas = MAS([ ("gpt-4o-mini", "https://api.openai.com/v1", api_key)
+,  ("gpt-4o-mini", "https://api.openai.com/v1", api_key)
+,  ("gpt-4o-mini", "https://api.openai.com/v1", api_key)
+])
 query = "Let p = (1, 2, 5, 4)(2, 3) in S_5. Find the index of <p> in S_5."
 print(mas.forward(query))
+# -> 
 
 # This code defines an `LLM` class that represents a large language model, and a `MAS` class that represents a multi-agent system. The `MAS` class has a `forward` method that takes a query as input and returns the final answer. The `forward` method uses three agents: a math agent, a feedback agent, and a refine agent. The math agent generates the list of all permutations of (1, 2, 3, 4, 5). The feedback agent provides feedback on the math agent's output. The refine agent provides the final answer.
 # The `get_permutations` method generates all permutations of a given list using the `itertools.permutations` function.
