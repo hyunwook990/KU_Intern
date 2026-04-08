@@ -2,15 +2,15 @@ import re
 import torch
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
-
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
 
 # -------------------------------
 # 1. 설정
 # -------------------------------
-MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(DEVICE)
 
 
 # -------------------------------
@@ -72,17 +72,20 @@ def build_elimination_prompt(
 
     prompt = f"""
 You are solving a multiple-choice question by process of elimination.
+Please answer with Korean
 
 Your task:
 1. Read the question carefully.
 2. Consider only the currently remaining options.
-3. Think step by step.
+3. Briefly explain why some options are less plausible.
 4. Choose exactly ONE option to eliminate because it is the least plausible.
-5. At the very end, output ONLY in the following format:
+5. Use the following format exactly:
 
+Reasoning: <your brief reasoning>
 Eliminate: <OPTION_LABEL>
 
-For example:
+Example:
+Reasoning: B is not correct because ..
 Eliminate: B
 
 {context_block}Question:
@@ -90,8 +93,6 @@ Eliminate: B
 
 Current remaining options:
 {option_text}
-
-Think carefully, then eliminate exactly one option.
 """.strip()
 
     return prompt
@@ -112,23 +113,23 @@ def generate_text(
         {"role": "user", "content": prompt}
     ]
 
-    input_ids = tokenizer.apply_chat_template(
+    inputs = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
         return_tensors="pt"
     ).to(model.device)
-
-    attention_mask = torch.ones_like(input_ids)
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
 
     with torch.no_grad():
         outputs = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            do_sample=True if temperature > 0 else False,
-            temperature=temperature,
-            top_p=top_p,
-            pad_token_id=tokenizer.pad_token_id,
+            do_sample=(temperature > 0),
+            temperature=temperature if temperature > 0 else None,
+            top_p=top_p if temperature > 0 else None,
+            pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id
         )
 
@@ -157,12 +158,13 @@ def parse_elimination_decision(
     valid_labels = {chr(ord('A') + idx): idx for idx in active_indices}
 
     patterns = [
+        r"^\s*Eliminate\s*:\s*([A-Z])\s*$",
         r"Eliminate\s*:\s*([A-Z])",
         r"eliminate\s+option\s+([A-Z])",
         r"remove\s+option\s+([A-Z])",
         r"remove\s+([A-Z])",
         r"eliminate\s+([A-Z])",
-    ]
+        ]
 
     for pattern in patterns:
         match = re.search(pattern, response_text, re.IGNORECASE)
@@ -313,10 +315,9 @@ def run_example():
     tokenizer, model = load_model(MODEL_NAME)
 
     sample = MCQSample(
-        question="대한민국의 수도는 어디인가?",
-        options=["부산", "서울", "인천", "대전"],
+        question="한국채택국제회계기준(K-IFRS)하에서 금융자산으로 분류되지 않는 것은?",
+        options=["대여금", "재고자산", "매출채권", "만기보유금융자산"],
         context=None,
-        answer=1
     )
 
     result = module_2_iterative_elimination(
