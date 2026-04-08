@@ -1,16 +1,17 @@
 import re
+import json
 import torch
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+
 # -------------------------------
 # 1. 설정
 # -------------------------------
-# MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(DEVICE)
+print("DEVICE:", DEVICE)
 
 
 # -------------------------------
@@ -21,7 +22,7 @@ class MCQSample:
     question: str
     options: List[str]
     context: Optional[str] = None
-    answer: Optional[int] = None  # 정답 인덱스 (선택사항)
+    answer: Optional[int] = None  # 정답 인덱스 (0~3)
 
 
 # -------------------------------
@@ -29,27 +30,158 @@ class MCQSample:
 # -------------------------------
 def load_model(model_name: str = MODEL_NAME):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         device_map="auto" if torch.cuda.is_available() else None
     )
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
     return tokenizer, model
 
 
 # -------------------------------
-# 4. 프롬프트 구성
+# 4. KMMLU 로더
+# -------------------------------
+def normalize_answer_to_index(answer) -> Optional[int]:
+    """
+    다양한 answer 표현을 0~3 인덱스로 변환
+    지원:
+    - "A"/"B"/"C"/"D"
+    - "a"/"b"/"c"/"d"
+    - 0/1/2/3
+    - 1/2/3/4
+    """
+    if answer is None:
+        return None
+
+    if isinstance(answer, str):
+        ans = answer.strip().upper()
+        if ans in {"A", "B", "C", "D"}:
+            return ord(ans) - ord("A")
+        if ans in {"0", "1", "2", "3"}:
+            return int(ans)
+        if ans in {"1", "2", "3", "4"}:
+            return int(ans) - 1
+
+    if isinstance(answer, int):
+        if answer in [0, 1, 2, 3]:
+            return answer
+        if answer in [1, 2, 3, 4]:
+            return answer - 1
+
+    return None
+
+
+def extract_question(item: dict) -> str:
+    for key in ["question", "query", "prompt"]:
+        if key in item:
+            return str(item[key]).strip()
+    raise ValueError(f"질문 필드를 찾을 수 없습니다: {item}")
+
+
+def extract_context(item: dict) -> Optional[str]:
+    for key in ["context", "passage", "article", "paragraph"]:
+        if key in item and item[key] is not None and str(item[key]).strip() != "":
+            return str(item[key]).strip()
+    return None
+
+
+def extract_options(item: dict) -> List[str]:
+    """
+    가능한 포맷들:
+    1) {"A": "...", "B": "...", "C": "...", "D": "..."}
+    2) {"choices": ["...", "...", "...", "..."]}
+    3) {"options": ["...", "...", "...", "..."]}
+    4) {"choices": {"A": "...", "B": "...", "C": "...", "D": "..."}}
+    """
+    if all(k in item for k in ["A", "B", "C", "D"]):
+        return [
+            str(item["A"]),
+            str(item["B"]),
+            str(item["C"]),
+            str(item["D"]),
+        ]
+
+    if "choices" in item:
+        choices = item["choices"]
+        if isinstance(choices, list) and len(choices) == 4:
+            return [str(x) for x in choices]
+        if isinstance(choices, dict) and all(k in choices for k in ["A", "B", "C", "D"]):
+            return [
+                str(choices["A"]),
+                str(choices["B"]),
+                str(choices["C"]),
+                str(choices["D"]),
+            ]
+
+    if "options" in item:
+        options = item["options"]
+        if isinstance(options, list) and len(options) == 4:
+            return [str(x) for x in options]
+        if isinstance(options, dict) and all(k in options for k in ["A", "B", "C", "D"]):
+            return [
+                str(options["A"]),
+                str(options["B"]),
+                str(options["C"]),
+                str(options["D"]),
+            ]
+
+    raise ValueError(f"선택지 필드를 찾을 수 없습니다: {item}")
+
+
+def extract_answer(item: dict) -> Optional[int]:
+    for key in ["answer", "label", "gold", "target"]:
+        if key in item:
+            return normalize_answer_to_index(item[key])
+    return None
+
+
+def convert_hf_item_to_sample(item: dict) -> MCQSample:
+    return MCQSample(
+        question=extract_question(item),
+        options=extract_options(item),
+        context=extract_context(item),
+        answer=extract_answer(item)
+    )
+
+
+def load_kmmlu_from_hf(
+    dataset_name: str = "HAERAE-HUB/KMMLU",
+    subject: str = "Accounting",
+    split: str = "test",
+    max_samples: Optional[int] = None
+) -> List[MCQSample]:
+    """
+    Hugging Face datasets에서 KMMLU 로드
+    예:
+        load_kmmlu_from_hf("HAERAE-HUB/KMMLU", "Accounting", "test")
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset(dataset_name, subject, split=split)
+
+    samples = []
+    for i, item in enumerate(ds):
+        try:
+            sample = convert_hf_item_to_sample(dict(item))
+            samples.append(sample)
+        except Exception as e:
+            print(f"[Skip] index={i}, reason={e}")
+
+        if max_samples is not None and len(samples) >= max_samples:
+            break
+
+    return samples
+
+
+# -------------------------------
+# 5. 프롬프트 구성
 # -------------------------------
 def format_options(option_indices: List[int], all_options: List[str]) -> str:
-    """
-    현재 살아남은 옵션만 보기 좋게 문자열로 변환
-    예:
-    A. ...
-    C. ...
-    D. ...
-    """
     lines = []
     for idx in option_indices:
         label = chr(ord('A') + idx)
@@ -63,16 +195,12 @@ def build_elimination_prompt(
     active_indices: List[int],
     context: Optional[str] = None
 ) -> str:
-    """
-    module_1의 Step 1: Prompt Construction
-    """
     option_text = format_options(active_indices, options)
-
     context_block = f"Context:\n{context}\n\n" if context else ""
 
     prompt = f"""
 You are solving a multiple-choice question by process of elimination.
-Please answer with Korean
+Please answer with Korean.
 
 Your task:
 1. Read the question carefully.
@@ -85,7 +213,7 @@ Reasoning: <your brief reasoning>
 Eliminate: <OPTION_LABEL>
 
 Example:
-Reasoning: B is not correct because ..
+Reasoning: B is not correct because ...
 Eliminate: B
 
 {context_block}Question:
@@ -99,7 +227,7 @@ Current remaining options:
 
 
 # -------------------------------
-# 5. 생성 함수
+# 6. 생성 함수
 # -------------------------------
 def generate_text(
     model,
@@ -109,17 +237,18 @@ def generate_text(
     temperature: float = 0.2,
     top_p: float = 0.9
 ) -> str:
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
+    messages = [{"role": "user", "content": prompt}]
 
-    inputs = tokenizer.apply_chat_template(
+    model_inputs = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
-        return_tensors="pt"
-    ).to(model.device)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+        return_tensors="pt",
+        return_dict=True
+    )
+
+    model_inputs = {k: v.to(model.device) for k, v in model_inputs.items()}
+    input_ids = model_inputs["input_ids"]
+    attention_mask = model_inputs["attention_mask"]
 
     with torch.no_grad():
         outputs = model.generate(
@@ -139,22 +268,12 @@ def generate_text(
 
 
 # -------------------------------
-# 6. 제거할 선택지 파싱
+# 7. 제거할 선택지 파싱
 # -------------------------------
 def parse_elimination_decision(
     response_text: str,
     active_indices: List[int]
 ) -> Optional[int]:
-    """
-    module_1의 Step 3: Parse Elimination Decision
-
-    가능한 출력 예:
-    - Eliminate: B
-    - eliminate option C
-    - Final decision: remove A
-    """
-
-    # 허용되는 라벨만 추출
     valid_labels = {chr(ord('A') + idx): idx for idx in active_indices}
 
     patterns = [
@@ -164,7 +283,7 @@ def parse_elimination_decision(
         r"remove\s+option\s+([A-Z])",
         r"remove\s+([A-Z])",
         r"eliminate\s+([A-Z])",
-        ]
+    ]
 
     for pattern in patterns:
         match = re.search(pattern, response_text, re.IGNORECASE)
@@ -173,7 +292,6 @@ def parse_elimination_decision(
             if label in valid_labels:
                 return valid_labels[label]
 
-    # 마지막 fallback: 텍스트 안에 단독 알파벳(A/B/C/D...)가 있는지 확인
     candidates = re.findall(r"\b([A-Z])\b", response_text.upper())
     for c in reversed(candidates):
         if c in valid_labels:
@@ -183,7 +301,7 @@ def parse_elimination_decision(
 
 
 # -------------------------------
-# 7. module_1 구현
+# 8. module_1 구현
 # -------------------------------
 def module_1_eliminate_one(
     model,
@@ -194,12 +312,6 @@ def module_1_eliminate_one(
     current_option_set: List[int],
     verbose: bool = True
 ) -> Tuple[List[int], str, Optional[int]]:
-    """
-    Require: Question q, Context c, Current option set Ot (|Ot| > 1)
-    Ensure: Revised option set Ot+1 after eliminating one option
-    """
-
-    # Step 1: Prompt Construction
     prompt = build_elimination_prompt(
         question=question,
         options=options,
@@ -207,21 +319,15 @@ def module_1_eliminate_one(
         context=context
     )
 
-    # Step 2: Model Reasoning
     reasoning = generate_text(model, tokenizer, prompt)
 
-    # Step 3: Parse Elimination Decision
     eliminated_idx = parse_elimination_decision(reasoning, current_option_set)
 
     if eliminated_idx is None:
-        # 파싱 실패 시 fallback: 마지막 옵션 제거 대신,
-        # 가장 뒤의 옵션을 임시 제거하는 방식보다
-        # 안전하게 예외 처리하는 편이 좋다.
         raise ValueError(
             f"모델 출력에서 제거할 선택지를 파싱하지 못했습니다.\n\n출력:\n{reasoning}"
         )
 
-    # Step 4: Remove Option
     next_option_set = [idx for idx in current_option_set if idx != eliminated_idx]
 
     if verbose:
@@ -233,12 +339,11 @@ def module_1_eliminate_one(
         print(f"[Module 1] Remaining options: {[chr(ord('A') + i) for i in next_option_set]}")
         print("=" * 60)
 
-    # Step 5: return
     return next_option_set, reasoning, eliminated_idx
 
 
 # -------------------------------
-# 8. module_2 구현
+# 9. module_2 구현
 # -------------------------------
 def module_2_iterative_elimination(
     model,
@@ -248,23 +353,14 @@ def module_2_iterative_elimination(
     context: Optional[str] = None,
     verbose: bool = True
 ) -> Dict:
-    """
-    Require: Question q, Context c, Full option set O = {o1, ..., ok}
-    Ensure: Predicted answer ô
-    """
-
-    # Step 1: Initialization
     current_option_set = list(range(len(options)))
     t = 0
-
     history = []
 
-    # Step 2: while |Ot| > 1 do
     while len(current_option_set) > 1:
         if verbose:
             print(f"\n[Module 2] Iteration t={t}")
 
-        # Step 3~4: module_1 호출
         next_option_set, reasoning, eliminated_idx = module_1_eliminate_one(
             model=model,
             tokenizer=tokenizer,
@@ -284,15 +380,12 @@ def module_2_iterative_elimination(
             "next_option_set": next_option_set.copy()
         })
 
-        # Step 5: t <- t + 1
         current_option_set = next_option_set
         t += 1
 
-    # Step 7: Final Answer Selection
     final_idx = current_option_set[0]
     final_label = chr(ord('A') + final_idx)
 
-    # Step 8: return ô
     result = {
         "predicted_index": final_idx,
         "predicted_label": final_label,
@@ -309,29 +402,114 @@ def module_2_iterative_elimination(
 
 
 # -------------------------------
-# 9. k-MMLU 스타일 샘플 예시 실행
+# 10. 단일 샘플 평가
 # -------------------------------
-def run_example():
-    tokenizer, model = load_model(MODEL_NAME)
-
-    sample = MCQSample(
-        question="한국채택국제회계기준(K-IFRS)하에서 금융자산으로 분류되지 않는 것은?",
-        options=["대여금", "재고자산", "매출채권", "만기보유금융자산"],
-        context=None,
-    )
-
-    result = module_2_iterative_elimination(
+def evaluate_sample(model, tokenizer, sample: MCQSample, verbose: bool = False) -> Dict:
+    pred = module_2_iterative_elimination(
         model=model,
         tokenizer=tokenizer,
         question=sample.question,
         options=sample.options,
         context=sample.context,
-        verbose=True
+        verbose=verbose
     )
 
-    print("\n[Result Dict]")
-    print(result)
+    predicted_index = pred["predicted_index"]
+    is_correct = None if sample.answer is None else (predicted_index == sample.answer)
+
+    return {
+        "question": sample.question,
+        "options": sample.options,
+        "gold_index": sample.answer,
+        "gold_label": None if sample.answer is None else chr(ord("A") + sample.answer),
+        "predicted_index": predicted_index,
+        "predicted_label": pred["predicted_label"],
+        "predicted_text": pred["predicted_text"],
+        "correct": is_correct,
+        "history": pred["history"]
+    }
+
+
+# -------------------------------
+# 11. 데이터셋 평가
+# -------------------------------
+def evaluate_dataset(
+    model,
+    tokenizer,
+    dataset: List[MCQSample],
+    verbose: bool = False,
+    save_path: Optional[str] = None
+) -> Dict:
+    results = []
+    total = 0
+    correct = 0
+    skipped = 0
+
+    for idx, sample in enumerate(dataset):
+        try:
+            result = evaluate_sample(model, tokenizer, sample, verbose=verbose)
+            results.append(result)
+
+            if sample.answer is not None:
+                total += 1
+                correct += int(result["correct"])
+
+            if (idx + 1) % 10 == 0:
+                acc = correct / total if total > 0 else 0.0
+                print(f"[{idx+1}/{len(dataset)}] accuracy={acc:.4f}, skipped={skipped}")
+
+        except Exception as e:
+            skipped += 1
+            print(f"[Error] sample index={idx}, reason={e}")
+
+    accuracy = correct / total if total > 0 else None
+
+    output = {
+        "accuracy": accuracy,
+        "num_evaluated": total,
+        "num_correct": correct,
+        "num_skipped": skipped,
+        "results": results
+    }
+
+    if save_path is not None:
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(output, f, ensure_ascii=False, indent=2)
+
+    return output
+
+
+# -------------------------------
+# 12. 실행 예시
+# -------------------------------
+def run_kmmlu_hf_example():
+    tokenizer, model = load_model(MODEL_NAME)
+
+    # 예시:
+    # subject는 KMMLU의 세부 과목(config name)
+    dataset = load_kmmlu_from_hf(
+        dataset_name="HAERAE-HUB/KMMLU",
+        subject="Accounting",
+        split="test",
+        max_samples=20   # 처음엔 작게 테스트 추천
+    )
+
+    print(f"Loaded samples: {len(dataset)}")
+
+    result = evaluate_dataset(
+        model=model,
+        tokenizer=tokenizer,
+        dataset=dataset,
+        verbose=False,
+        save_path="kmmlu_accounting_results.json"
+    )
+
+    print("\n===== FINAL RESULT =====")
+    print("Accuracy:", result["accuracy"])
+    print("Num evaluated:", result["num_evaluated"])
+    print("Num correct:", result["num_correct"])
+    print("Num skipped:", result["num_skipped"])
 
 
 if __name__ == "__main__":
-    run_example()
+    run_kmmlu_hf_example()
