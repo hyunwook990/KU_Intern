@@ -51,7 +51,7 @@ class ModuleDResult:
 # =========================================================
 
 MODULE_A_PROMPT = """You are a careful multiple-choice test taker.
-Please answer with Korean
+Please answer with Korean.
 
 Your task is to evaluate ONLY the target option below.
 
@@ -85,6 +85,7 @@ Rules:
 """
 
 SELF_DEBATE_PROMPT = """You are a careful multiple-choice test taker.
+Please answer with Korean.
 
 Question:
 {question}
@@ -117,6 +118,7 @@ Rules:
 """
 
 MODULE_D_PROMPT = """You are a careful multiple-choice test taker.
+Please answer with Korean.
 
 Question:
 {question}
@@ -214,7 +216,7 @@ def extract_json_block(text: str) -> str:
 def safe_json_loads(text: str) -> dict:
     raw = extract_json_block(text)
     raw = raw.replace("“", '"').replace("”", '"').replace("’", "'")
-    raw = re.sub(r",(\s*[}\]])", r"\1", raw)  # trailing comma 제거
+    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
     return json.loads(raw)
 
 
@@ -241,6 +243,205 @@ def parse_option_reasoning(raw_output: str) -> OptionReasoning:
         rationale=rationale,
         confidence=confidence
     )
+
+
+# =========================================================
+# KMMLU Loader Utils
+# =========================================================
+
+def normalize_answer_label(answer) -> Optional[str]:
+    """
+    다양한 정답 표현을 A/B/C/D로 통일
+    지원 예:
+    - "A", "B", "C", "D"
+    - "a", "b", ...
+    - 0,1,2,3
+    - 1,2,3,4
+    """
+    if answer is None:
+        return None
+
+    if isinstance(answer, str):
+        answer = answer.strip()
+        if answer.upper() in {"A", "B", "C", "D"}:
+            return answer.upper()
+        if answer in {"0", "1", "2", "3"}:
+            return ["A", "B", "C", "D"][int(answer)]
+        if answer in {"1", "2", "3", "4"}:
+            return ["A", "B", "C", "D"][int(answer) - 1]
+
+    if isinstance(answer, int):
+        if answer in [0, 1, 2, 3]:
+            return ["A", "B", "C", "D"][answer]
+        if answer in [1, 2, 3, 4]:
+            return ["A", "B", "C", "D"][answer - 1]
+
+    raise ValueError(f"Unsupported answer format: {answer}")
+
+
+def extract_options_from_item(item: dict) -> Dict[str, str]:
+    """
+    KMMLU/유사 MCQ 포맷을 최대한 유연하게 처리
+    지원 예:
+    1)
+      {"A": "...", "B": "...", "C": "...", "D": "..."}
+    2)
+      {"options": {"A": "...", "B": "...", "C": "...", "D": "..."}}
+    3)
+      {"choices": ["...", "...", "...", "..."]}
+    4)
+      {"choices": {"A": "...", "B": "...", "C": "...", "D": "..."}}
+    """
+    if all(k in item for k in ["A", "B", "C", "D"]):
+        return {
+            "A": str(item["A"]),
+            "B": str(item["B"]),
+            "C": str(item["C"]),
+            "D": str(item["D"]),
+        }
+
+    if "options" in item:
+        opts = item["options"]
+        if isinstance(opts, dict) and all(k in opts for k in ["A", "B", "C", "D"]):
+            return {
+                "A": str(opts["A"]),
+                "B": str(opts["B"]),
+                "C": str(opts["C"]),
+                "D": str(opts["D"]),
+            }
+
+    if "choices" in item:
+        choices = item["choices"]
+
+        if isinstance(choices, list):
+            if len(choices) != 4:
+                raise ValueError(f"choices length must be 4, got {len(choices)}")
+            return {
+                "A": str(choices[0]),
+                "B": str(choices[1]),
+                "C": str(choices[2]),
+                "D": str(choices[3]),
+            }
+
+        if isinstance(choices, dict) and all(k in choices for k in ["A", "B", "C", "D"]):
+            return {
+                "A": str(choices["A"]),
+                "B": str(choices["B"]),
+                "C": str(choices["C"]),
+                "D": str(choices["D"]),
+            }
+
+    raise ValueError(f"Cannot extract options from item: {item}")
+
+
+def extract_question_from_item(item: dict) -> str:
+    for key in ["question", "query", "prompt"]:
+        if key in item:
+            return str(item[key]).strip()
+    raise ValueError(f"Cannot find question field in item: {item}")
+
+
+def extract_answer_from_item(item: dict) -> Optional[str]:
+    for key in ["answer", "label", "gold", "target"]:
+        if key in item:
+            return normalize_answer_label(item[key])
+    return None
+
+
+def convert_to_question_sample(item: dict) -> QuestionSample:
+    question = extract_question_from_item(item)
+    options = extract_options_from_item(item)
+    answer = extract_answer_from_item(item)
+
+    return QuestionSample(
+        question=question,
+        options=options,
+        answer=answer
+    )
+
+
+def load_kmmlu_json(path: str) -> List[QuestionSample]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        if "data" in data:
+            data = data["data"]
+        else:
+            raise ValueError("JSON root is dict but no 'data' field found.")
+
+    if not isinstance(data, list):
+        raise ValueError("JSON file must contain a list of items or a dict with 'data'.")
+
+    return [convert_to_question_sample(item) for item in data]
+
+
+def load_kmmlu_jsonl(path: str) -> List[QuestionSample]:
+    samples = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            samples.append(convert_to_question_sample(item))
+    return samples
+
+
+def load_kmmlu_hf(
+    dataset_name: str = "HAERAE-HUB/KMMLU",
+    subject: Optional[str] = None,
+    split: str = "test"
+) -> List[QuestionSample]:
+    """
+    Hugging Face datasets에서 직접 불러오기
+    예:
+        load_kmmlu_hf(dataset_name="HAERAE-HUB/KMMLU", subject="accounting", split="test")
+    """
+    from datasets import load_dataset
+
+    if subject is None:
+        raise ValueError("subject(= config name)를 지정해야 합니다. 예: 'accounting'")
+
+    ds = load_dataset(dataset_name, subject, split=split)
+
+    samples = []
+    for item in ds:
+        samples.append(convert_to_question_sample(dict(item)))
+    return samples
+
+
+def load_kmmlu(
+    path: Optional[str] = None,
+    hf_dataset_name: Optional[str] = None,
+    hf_subject: Optional[str] = None,
+    hf_split: str = "test"
+) -> List[QuestionSample]:
+    """
+    사용 방법:
+    1) 로컬 json
+       load_kmmlu(path="kmmlu.json")
+    2) 로컬 jsonl
+       load_kmmlu(path="kmmlu.jsonl")
+    3) HF datasets
+       load_kmmlu(hf_dataset_name="HAERAE-HUB/KMMLU", hf_subject="accounting", hf_split="test")
+    """
+    if path is not None:
+        if path.endswith(".json"):
+            return load_kmmlu_json(path)
+        elif path.endswith(".jsonl"):
+            return load_kmmlu_jsonl(path)
+        else:
+            raise ValueError("Only .json and .jsonl are supported for local files.")
+
+    if hf_dataset_name is not None:
+        return load_kmmlu_hf(
+            dataset_name=hf_dataset_name,
+            subject=hf_subject,
+            split=hf_split
+        )
+
+    raise ValueError("Either path or hf_dataset_name must be provided.")
 
 
 # =========================================================
@@ -304,15 +505,6 @@ class ModuleB:
         confidences: Dict[str, float],
         decisions: Optional[Dict[str, str]] = None
     ) -> ModuleBResult:
-        """
-        기본 규칙:
-        - confidence >= threshold 이면 keep
-        - confidence < threshold 이면 eliminate
-
-        decisions를 같이 주면,
-        decision이 eliminate인데 confidence가 threshold 이상인 이상한 경우를 막기 위해
-        decision도 반영할 수 있음.
-        """
         elimination_mask = {}
         remaining_options = []
 
@@ -418,7 +610,6 @@ class ModuleD:
         chosen_answer_override: Optional[str] = None,
         temperature: float = 0.0
     ) -> ModuleDResult:
-        # 1. final answer selection
         if chosen_answer_override is not None:
             a_star = chosen_answer_override
         elif len(remaining_options) == 1:
@@ -426,7 +617,6 @@ class ModuleD:
         else:
             a_star = max(remaining_options, key=lambda x: confidences[x])
 
-        # 2. explanation generation
         correct_rationale = rationales[a_star]
         wrong_rationales = []
         for opt in ["A", "B", "C", "D"]:
@@ -447,7 +637,6 @@ class ModuleD:
 
         final_explanation = self.llm.generate(prompt, temperature=temperature)
 
-        # 3. calibrated confidence
         raw_conf = confidences[a_star]
         calibrated = clamp_confidence(self.calibration_fn(raw_conf))
 
@@ -483,23 +672,14 @@ class EliminationPipeline:
         options: Dict[str, str],
         confidences: Dict[str, float]
     ) -> List[str]:
-        """
-        전부 eliminate 되는 경우, confidence 최고인 옵션 하나는 살림
-        """
         if len(confidences) == 0:
             return list(options.keys())[:1]
         best = max(confidences, key=confidences.get)
         return [best]
 
     def run(self, sample: QuestionSample, temperature: float = 0.0) -> Dict:
-        # -------------------------
-        # Module A
-        # -------------------------
         a_result = self.module_a.run(sample, temperature=temperature)
 
-        # -------------------------
-        # Module B
-        # -------------------------
         b_result = self.module_b.run(
             options=sample.options,
             confidences=a_result.confidences,
@@ -526,11 +706,9 @@ class EliminationPipeline:
             action = self.module_c.run(remaining, confidences, k)
 
             if action == "eliminate_more":
-                # 남은 옵션만 재평가
                 sub_conf = {opt: confidences[opt] for opt in remaining}
                 sorted_opts = sorted(sub_conf, key=sub_conf.get, reverse=True)
 
-                # 상위 2개만 남기는 간단한 제거 전략
                 remaining = sorted_opts[:2]
                 k += 1
 
@@ -556,9 +734,6 @@ class EliminationPipeline:
             else:
                 break
 
-        # -------------------------
-        # Module D
-        # -------------------------
         d_result = self.module_d.run(
             sample=sample,
             remaining_options=remaining,
@@ -595,13 +770,18 @@ class EliminationPipeline:
 # Evaluation
 # =========================================================
 
-def evaluate_dataset(pipeline: EliminationPipeline, dataset: List[QuestionSample]) -> Dict:
+def evaluate_dataset(
+    pipeline: EliminationPipeline,
+    dataset: List[QuestionSample],
+    temperature: float = 0.0,
+    verbose: bool = True
+) -> Dict:
     predictions = []
     correct = 0
     total = 0
 
-    for sample in dataset:
-        output = pipeline.run(sample)
+    for idx, sample in enumerate(dataset):
+        output = pipeline.run(sample, temperature=temperature)
         pred = output["module_d"]["final_answer"]
 
         row = {
@@ -609,13 +789,18 @@ def evaluate_dataset(pipeline: EliminationPipeline, dataset: List[QuestionSample
             "prediction": pred,
             "gold": sample.answer,
             "correct": None if sample.answer is None else pred == sample.answer,
-            "confidence": output["module_d"]["calibrated_confidence"]
+            "confidence": output["module_d"]["calibrated_confidence"],
+            "final_explanation": output["module_d"]["final_explanation"]
         }
         predictions.append(row)
 
         if sample.answer is not None:
             total += 1
             correct += int(pred == sample.answer)
+
+        if verbose and (idx + 1) % 10 == 0:
+            acc_so_far = correct / total if total > 0 else 0.0
+            print(f"[{idx + 1}/{len(dataset)}] current accuracy = {acc_so_far:.4f}")
 
     acc = (correct / total) if total > 0 else None
 
@@ -627,7 +812,16 @@ def evaluate_dataset(pipeline: EliminationPipeline, dataset: List[QuestionSample
 
 
 # =========================================================
-# Example
+# Save Utils
+# =========================================================
+
+def save_results_json(result: Dict, path: str):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+
+# =========================================================
+# Example Main
 # =========================================================
 
 if __name__ == "__main__":
@@ -642,20 +836,40 @@ if __name__ == "__main__":
 
     pipeline = EliminationPipeline(
         llm=llm,
-        threshold=0.5,
+        threshold=0.5,   # KMMLU에서는 0.5~0.6 정도 실험 추천
         k_max=2,
         calibration_fn=lambda x: x
     )
 
-    sample = QuestionSample(
-        question="한국채택국제회계기준(K-IFRS)하에서 금융자산으로 분류되지 않는 것은?",
-        options={
-            "A": "대여금",
-            "B": "재고자산",
-            "C": "매출채권",
-            "D": "만기보유금융자산"
-        },
+    # -----------------------------------------------------
+    # 방법 1: 로컬 JSON / JSONL 파일 사용
+    # -----------------------------------------------------
+    # dataset = load_kmmlu(path="kmmlu_test.json")
+    # dataset = load_kmmlu(path="kmmlu_test.jsonl")
+
+    # -----------------------------------------------------
+    # 방법 2: Hugging Face datasets 사용
+    # subject는 KMMLU의 config 이름으로 넣어야 함
+    # 예: "accounting", "law", ...
+    # -----------------------------------------------------
+    dataset = load_kmmlu(
+        hf_dataset_name="HAERAE-HUB/KMMLU",
+        hf_subject="accounting",
+        hf_split="test"
     )
 
-    result = pipeline.run(sample)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(f"Loaded {len(dataset)} samples")
+
+    result = evaluate_dataset(
+        pipeline=pipeline,
+        dataset=dataset,
+        temperature=0.0,
+        verbose=True
+    )
+
+    print("\n===== Final Result =====")
+    print("Accuracy:", result["accuracy"])
+    print("Num evaluated:", result["num_evaluated"])
+
+    save_results_json(result, "kmmlu_results.json")
+    print("Saved results to kmmlu_results.json")
