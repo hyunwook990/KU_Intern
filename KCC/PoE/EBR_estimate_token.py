@@ -1,3 +1,4 @@
+# 선택지 전부 입력, 하나씩 제거
 import re
 import json
 import torch
