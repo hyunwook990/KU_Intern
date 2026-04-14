@@ -131,10 +131,10 @@ MODULE_A_PROMPT_KO = """당신은 객관식 문제의 하나의 선택지만 평
 3. 이 선택지가 틀릴 수 있는 이유 또는 한계를 반드시 포함하세요.
 
 반드시 아래 JSON 형식으로만 답하세요:
-{
+{{
   "rationale": "설명",
   "confidence": 0.0
-}
+}}
 
 규칙:
 - 이 선택지가 맞다고 가정하지 마세요.
@@ -158,10 +158,10 @@ Task:
 3. Explicitly identify why this option could be wrong or what limitation it has.
 
 Return ONLY valid JSON:
-{
+{{
   "rationale": "your explanation",
   "confidence": 0.0
-}
+}}
 
 Rules:
 - Do NOT assume the option is correct.
@@ -196,11 +196,11 @@ SELF_DEBATE_PROMPT_KO = """당신은 두 개의 선택지를 비교하는 전문
 4. 탈락하는 선택지가 왜 더 부적절한지 명확히 설명하세요.
 
 반드시 아래 JSON 형식으로만 답하세요:
-{
+{{
   "winner": "{opt1_label}" 또는 "{opt2_label}",
   "reason": "설명",
   "confidence": 0.0
-}
+}}
 
 규칙:
 - 반드시 탈락하는 선택지의 한계나 문제점을 명확히 설명하세요.
@@ -236,11 +236,11 @@ Task:
 4. Explicitly state the limitation of the losing option.
 
 Return ONLY valid JSON:
-{
+{{
   "winner": "{opt1_label}" or "{opt2_label}",
   "reason": "your explanation",
   "confidence": 0.0
-}
+}}
 
 Rules:
 - You MUST explain why the losing option is less appropriate.
@@ -1374,7 +1374,8 @@ def evaluate_dataset(
     dataset_total_calls = 0
     dataset_module_usage = init_dataset_module_usage()
 
-    for idx, sample in enumerate(dataset):
+    for idx, sample in enumerate(dataset):    
+        print("=============="+idx+"/"+len(dataset)+"==============")
         try:
             output = pipeline.run(
                 sample=sample,
@@ -1531,5 +1532,4 @@ if __name__ == "__main__":
     print("Self Debate:", result["avg_module_usage"]["self_debate"])
     print("Module D:", result["avg_module_usage"]["module_d"])
 
-    save_results_json(result, "ets_accounting_test.json")
-    print("Saved results to ets_accounting_test.json")
+    save_results_json(result, "ETS_est_accounting_test.json")

@@ -390,6 +390,7 @@ def evaluate_dataset(
     dataset_total_calls = 0
 
     for idx, sample in enumerate(dataset):
+        print("=============="+idx+"/"+len(dataset)+"==============")
         try:
             result = evaluate_sample(model, tokenizer, sample, verbose=verbose)
             results.append(result)
@@ -478,7 +479,7 @@ def main():
         tokenizer=tokenizer,
         dataset=dataset,
         verbose=True,
-        save_path="ebr_accounting_test.json"
+        save_path="EBR_est_accounting_test.json"
     )
 
     print("\n===== FINAL RESULT =====")
