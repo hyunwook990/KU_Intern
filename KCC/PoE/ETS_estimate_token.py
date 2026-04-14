@@ -1374,8 +1374,7 @@ def evaluate_dataset(
     dataset_total_calls = 0
     dataset_module_usage = init_dataset_module_usage()
 
-    for idx, sample in enumerate(dataset):    
-        print("=============="+idx+"/"+len(dataset)+"==============")
+    for idx, sample in enumerate(dataset):
         try:
             output = pipeline.run(
                 sample=sample,

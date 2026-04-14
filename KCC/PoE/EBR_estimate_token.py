@@ -390,7 +390,6 @@ def evaluate_dataset(
     dataset_total_calls = 0
 
     for idx, sample in enumerate(dataset):
-        print("=============="+idx+"/"+len(dataset)+"==============")
         try:
             result = evaluate_sample(model, tokenizer, sample, verbose=verbose)
             results.append(result)
