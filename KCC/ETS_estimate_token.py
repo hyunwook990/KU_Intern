@@ -29,10 +29,21 @@ class QuestionSample:
 
 
 @dataclass
+class GenerationResult:
+    text: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+@dataclass
 class ModuleAOptionResult:
     rationale: str
     confidence: float
     raw_output: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 @dataclass
@@ -40,6 +51,13 @@ class ModuleAResult:
     rationales: List[str]
     confidences: List[float]
     raw_outputs: List[str]
+    input_tokens_list: List[int]
+    output_tokens_list: List[int]
+    total_tokens_list: List[int]
+    num_calls: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
 
 
 @dataclass
@@ -58,11 +76,27 @@ class ModuleCResult:
 
 
 @dataclass
+class SelfDebateResult:
+    winner_local_index: int
+    reason: str
+    confidence: float
+    raw_output: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    num_calls: int = 1
+
+
+@dataclass
 class ModuleDResult:
     final_answer_label: str
     final_explanation: str
     calibrated_confidence: float
     raw_output: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    num_calls: int = 1
 
 
 @dataclass
@@ -308,7 +342,7 @@ class HFLLM:
             device_map=device_map if torch.cuda.is_available() else None,
         )
 
-    def generate(self, prompt: str, temperature: float = 0.0) -> str:
+    def generate(self, prompt: str, temperature: float = 0.0) -> GenerationResult:
         messages = [{"role": "user", "content": prompt}]
         input_text = self.tokenizer.apply_chat_template(
             messages,
@@ -322,6 +356,8 @@ class HFLLM:
             truncation=True,
             padding=True
         ).to(self.model.device)
+
+        input_tokens = inputs["input_ids"].shape[1]
 
         gen_kwargs = {
             "max_new_tokens": self.max_new_tokens,
@@ -340,7 +376,16 @@ class HFLLM:
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
         new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        output_tokens = new_tokens.shape[0]
+        total_tokens = input_tokens + output_tokens
+        text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+        return GenerationResult(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens
+        )
 
 
 # =========================================================
@@ -391,7 +436,12 @@ def label_to_index(label: str) -> int:
     return labels.index(label)
 
 
-def parse_module_a_option_output(raw_output: str) -> ModuleAOptionResult:
+def parse_module_a_option_output(
+    raw_output: str,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int
+) -> ModuleAOptionResult:
     data = safe_json_loads(raw_output)
 
     rationale = str(data["rationale"]).strip()
@@ -400,7 +450,10 @@ def parse_module_a_option_output(raw_output: str) -> ModuleAOptionResult:
     return ModuleAOptionResult(
         rationale=rationale,
         confidence=confidence,
-        raw_output=raw_output
+        raw_output=raw_output,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens
     )
 
 
@@ -499,6 +552,10 @@ class ModuleA:
         confidences = []
         raw_outputs = []
 
+        input_tokens_list = []
+        output_tokens_list = []
+        total_tokens_list = []
+
         print("==============================Module_A==============================")
         for target_idx in range(len(options)):
             prompt = self._build_prompt(
@@ -507,17 +564,33 @@ class ModuleA:
                 prompt_template=prompt_template,
                 target_idx=target_idx
             )
-            raw = self.llm.generate(prompt, temperature=temperature)
-            parsed = parse_module_a_option_output(raw)
+            gen_result = self.llm.generate(prompt, temperature=temperature)
+            parsed = parse_module_a_option_output(
+                gen_result.text,
+                gen_result.input_tokens,
+                gen_result.output_tokens,
+                gen_result.total_tokens
+            )
 
             rationales.append(parsed.rationale)
             confidences.append(parsed.confidence)
             raw_outputs.append(parsed.raw_output)
 
+            input_tokens_list.append(parsed.input_tokens)
+            output_tokens_list.append(parsed.output_tokens)
+            total_tokens_list.append(parsed.total_tokens)
+
         return ModuleAResult(
             rationales=rationales,
             confidences=confidences,
-            raw_outputs=raw_outputs
+            raw_outputs=raw_outputs,
+            input_tokens_list=input_tokens_list,
+            output_tokens_list=output_tokens_list,
+            total_tokens_list=total_tokens_list,
+            num_calls=len(options),
+            total_input_tokens=sum(input_tokens_list),
+            total_output_tokens=sum(output_tokens_list),
+            total_tokens=sum(total_tokens_list)
         )
 
 
@@ -662,7 +735,7 @@ def run_self_debate(
     rationales: List[str],
     confidences: List[float],
     temperature: float = 0.0
-) -> Tuple[int, str, float, str]:
+) -> SelfDebateResult:
     print("==============================Self_Debate==============================")
     if len(options) != 2:
         raise ValueError("Self-debate는 선택지가 정확히 2개일 때만 실행됩니다.")
@@ -679,8 +752,8 @@ def run_self_debate(
         conf2=confidences[1]
     )
 
-    raw = llm.generate(prompt, temperature=temperature)
-    data = safe_json_loads(raw)
+    gen_result = llm.generate(prompt, temperature=temperature)
+    data = safe_json_loads(gen_result.text)
 
     winner_label = str(data["winner"]).strip().upper()
     reason = str(data["reason"]).strip()
@@ -691,7 +764,15 @@ def run_self_debate(
 
     winner_local_index = labels.index(winner_label)
 
-    return winner_local_index, reason, confidence, raw
+    return SelfDebateResult(
+        winner_local_index=winner_local_index,
+        reason=reason,
+        confidence=confidence,
+        raw_output=gen_result.text,
+        input_tokens=gen_result.input_tokens,
+        output_tokens=gen_result.output_tokens,
+        total_tokens=gen_result.total_tokens
+    )
 
 
 # =========================================================
@@ -785,14 +866,17 @@ class ModuleD:
             other_remaining_rationales_text=other_remaining_rationales_text
         )
 
-        raw = self.llm.generate(prompt, temperature=temperature)
+        gen_result = self.llm.generate(prompt, temperature=temperature)
         calibrated_confidence = clamp_confidence(self.calibration_fn(chosen_confidence))
 
         return ModuleDResult(
             final_answer_label=chosen_label,
-            final_explanation=raw.strip(),
+            final_explanation=gen_result.text.strip(),
             calibrated_confidence=calibrated_confidence,
-            raw_output=raw
+            raw_output=gen_result.text,
+            input_tokens=gen_result.input_tokens,
+            output_tokens=gen_result.output_tokens,
+            total_tokens=gen_result.total_tokens
         )
 
 
@@ -864,6 +948,53 @@ class EliminationPipeline:
             )
         return records
 
+    def _init_usage(self) -> Dict:
+        return {
+            "num_calls": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_tokens": 0,
+            "by_module": {
+                "module_a": {
+                    "num_calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0
+                },
+                "self_debate": {
+                    "num_calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0
+                },
+                "module_d": {
+                    "num_calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0
+                }
+            }
+        }
+
+    def _add_module_usage(
+        self,
+        usage: Dict,
+        module_name: str,
+        num_calls: int,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int
+    ) -> None:
+        usage["num_calls"] += num_calls
+        usage["total_input_tokens"] += input_tokens
+        usage["total_output_tokens"] += output_tokens
+        usage["total_tokens"] += total_tokens
+
+        usage["by_module"][module_name]["num_calls"] += num_calls
+        usage["by_module"][module_name]["input_tokens"] += input_tokens
+        usage["by_module"][module_name]["output_tokens"] += output_tokens
+        usage["by_module"][module_name]["total_tokens"] += total_tokens
+
     def run(
         self,
         sample: QuestionSample,
@@ -878,6 +1009,7 @@ class EliminationPipeline:
 
         trace = []
         eliminated_records: List[EliminatedOptionRecord] = []
+        sample_usage = self._init_usage()
 
         while True:
             a_result = self.module_a.run(
@@ -885,6 +1017,15 @@ class EliminationPipeline:
                 options=current_options,
                 prompt_template=actual_prompt_template,
                 temperature=temperature
+            )
+
+            self._add_module_usage(
+                usage=sample_usage,
+                module_name="module_a",
+                num_calls=a_result.num_calls,
+                input_tokens=a_result.total_input_tokens,
+                output_tokens=a_result.total_output_tokens,
+                total_tokens=a_result.total_tokens
             )
 
             b_result = self.module_b.run(
@@ -922,7 +1063,14 @@ class EliminationPipeline:
                 "module_a": {
                     "rationales": a_result.rationales,
                     "confidences": a_result.confidences,
-                    "raw_outputs": a_result.raw_outputs
+                    "raw_outputs": a_result.raw_outputs,
+                    "input_tokens_list": a_result.input_tokens_list,
+                    "output_tokens_list": a_result.output_tokens_list,
+                    "total_tokens_list": a_result.total_tokens_list,
+                    "num_calls": a_result.num_calls,
+                    "total_input_tokens": a_result.total_input_tokens,
+                    "total_output_tokens": a_result.total_output_tokens,
+                    "total_tokens": a_result.total_tokens
                 },
                 "module_b": {
                     "elimination_mask": b_result.elimination_mask,
@@ -945,6 +1093,17 @@ class EliminationPipeline:
                     "second_confidence": c_result.second_confidence,
                     "confidence_gap": c_result.confidence_gap,
                     "reason": c_result.reason
+                },
+                "running_usage": {
+                    "num_calls": sample_usage["num_calls"],
+                    "total_input_tokens": sample_usage["total_input_tokens"],
+                    "total_output_tokens": sample_usage["total_output_tokens"],
+                    "total_tokens": sample_usage["total_tokens"],
+                    "by_module": {
+                        "module_a": dict(sample_usage["by_module"]["module_a"]),
+                        "self_debate": dict(sample_usage["by_module"]["self_debate"]),
+                        "module_d": dict(sample_usage["by_module"]["module_d"])
+                    }
                 }
             })
 
@@ -978,6 +1137,15 @@ class EliminationPipeline:
                     temperature=temperature
                 )
 
+                self._add_module_usage(
+                    usage=sample_usage,
+                    module_name="module_d",
+                    num_calls=d_result.num_calls,
+                    input_tokens=d_result.input_tokens,
+                    output_tokens=d_result.output_tokens,
+                    total_tokens=d_result.total_tokens
+                )
+
                 return {
                     "trace": trace,
                     "final": {
@@ -985,7 +1153,8 @@ class EliminationPipeline:
                         "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
                         "final_explanation": d_result.final_explanation,
                         "confidence": d_result.calibrated_confidence
-                    }
+                    },
+                    "usage": sample_usage
                 }
 
             if c_result.next_action == "eliminate_more":
@@ -1006,7 +1175,7 @@ class EliminationPipeline:
                 debate_confidences = [remaining_confidences[i] for i in debate_local_indices]
                 debate_global_indices = [remaining_global_indices[i] for i in debate_local_indices]
 
-                winner_local_idx, debate_reason, debate_conf, raw = run_self_debate(
+                debate_result = run_self_debate(
                     llm=self.llm,
                     question=sample.question,
                     options=debate_options,
@@ -1016,6 +1185,16 @@ class EliminationPipeline:
                     temperature=temperature
                 )
 
+                self._add_module_usage(
+                    usage=sample_usage,
+                    module_name="self_debate",
+                    num_calls=debate_result.num_calls,
+                    input_tokens=debate_result.input_tokens,
+                    output_tokens=debate_result.output_tokens,
+                    total_tokens=debate_result.total_tokens
+                )
+
+                winner_local_idx = debate_result.winner_local_index
                 loser_local_idx = 1 - winner_local_idx if len(debate_local_indices) == 2 else None
 
                 trace[-1]["self_debate"] = {
@@ -1026,9 +1205,12 @@ class EliminationPipeline:
                     "candidate_confidences": debate_confidences,
                     "winner_label": debate_labels[winner_local_idx],
                     "winner_option": debate_options[winner_local_idx],
-                    "reason": debate_reason,
-                    "confidence": debate_conf,
-                    "raw_output": raw
+                    "reason": debate_result.reason,
+                    "confidence": debate_result.confidence,
+                    "raw_output": debate_result.raw_output,
+                    "input_tokens": debate_result.input_tokens,
+                    "output_tokens": debate_result.output_tokens,
+                    "total_tokens": debate_result.total_tokens
                 }
 
                 d_eliminated_records = list(eliminated_records)
@@ -1048,10 +1230,19 @@ class EliminationPipeline:
                     question=sample.question,
                     remaining_labels=[debate_labels[winner_local_idx]],
                     remaining_options=[debate_options[winner_local_idx]],
-                    rationales=[debate_reason],
-                    confidences=[max(debate_confidences[winner_local_idx], debate_conf)],
+                    rationales=[debate_result.reason],
+                    confidences=[max(debate_confidences[winner_local_idx], debate_result.confidence)],
                     eliminated_records=d_eliminated_records,
                     temperature=temperature
+                )
+
+                self._add_module_usage(
+                    usage=sample_usage,
+                    module_name="module_d",
+                    num_calls=d_result.num_calls,
+                    input_tokens=d_result.input_tokens,
+                    output_tokens=d_result.output_tokens,
+                    total_tokens=d_result.total_tokens
                 )
 
                 return {
@@ -1061,7 +1252,8 @@ class EliminationPipeline:
                         "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
                         "final_explanation": d_result.final_explanation,
                         "confidence": d_result.calibrated_confidence
-                    }
+                    },
+                    "usage": sample_usage
                 }
 
             d_result = self.module_d.run(
@@ -1074,6 +1266,15 @@ class EliminationPipeline:
                 temperature=temperature
             )
 
+            self._add_module_usage(
+                usage=sample_usage,
+                module_name="module_d",
+                num_calls=d_result.num_calls,
+                input_tokens=d_result.input_tokens,
+                output_tokens=d_result.output_tokens,
+                total_tokens=d_result.total_tokens
+            )
+
             return {
                 "trace": trace,
                 "final": {
@@ -1081,13 +1282,79 @@ class EliminationPipeline:
                     "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
                     "final_explanation": d_result.final_explanation,
                     "confidence": d_result.calibrated_confidence
-                }
+                },
+                "usage": sample_usage
             }
 
 
 # =========================================================
 # Evaluation
 # =========================================================
+
+def init_dataset_module_usage() -> Dict:
+    return {
+        "module_a": {
+            "num_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        },
+        "self_debate": {
+            "num_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        },
+        "module_d": {
+            "num_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        }
+    }
+
+
+def update_dataset_module_usage(dataset_module_usage: Dict, sample_module_usage: Dict) -> None:
+    for module_name in ["module_a", "self_debate", "module_d"]:
+        dataset_module_usage[module_name]["num_calls"] += sample_module_usage[module_name]["num_calls"]
+        dataset_module_usage[module_name]["input_tokens"] += sample_module_usage[module_name]["input_tokens"]
+        dataset_module_usage[module_name]["output_tokens"] += sample_module_usage[module_name]["output_tokens"]
+        dataset_module_usage[module_name]["total_tokens"] += sample_module_usage[module_name]["total_tokens"]
+
+
+def compute_avg_module_usage(dataset_module_usage: Dict, num_processed: int) -> Dict:
+    if num_processed == 0:
+        return {
+            "module_a": {
+                "avg_num_calls": None,
+                "avg_input_tokens": None,
+                "avg_output_tokens": None,
+                "avg_total_tokens": None
+            },
+            "self_debate": {
+                "avg_num_calls": None,
+                "avg_input_tokens": None,
+                "avg_output_tokens": None,
+                "avg_total_tokens": None
+            },
+            "module_d": {
+                "avg_num_calls": None,
+                "avg_input_tokens": None,
+                "avg_output_tokens": None,
+                "avg_total_tokens": None
+            }
+        }
+
+    avg_usage = {}
+    for module_name in ["module_a", "self_debate", "module_d"]:
+        avg_usage[module_name] = {
+            "avg_num_calls": dataset_module_usage[module_name]["num_calls"] / num_processed,
+            "avg_input_tokens": dataset_module_usage[module_name]["input_tokens"] / num_processed,
+            "avg_output_tokens": dataset_module_usage[module_name]["output_tokens"] / num_processed,
+            "avg_total_tokens": dataset_module_usage[module_name]["total_tokens"] / num_processed
+        }
+    return avg_usage
+
 
 def evaluate_dataset(
     pipeline: EliminationPipeline,
@@ -1101,6 +1368,12 @@ def evaluate_dataset(
     total = 0
     skipped = 0
 
+    dataset_total_input_tokens = 0
+    dataset_total_output_tokens = 0
+    dataset_total_tokens = 0
+    dataset_total_calls = 0
+    dataset_module_usage = init_dataset_module_usage()
+
     for idx, sample in enumerate(dataset):
         try:
             output = pipeline.run(
@@ -1110,6 +1383,7 @@ def evaluate_dataset(
             )
 
             pred_label = output["final"]["answer_label"]
+            usage = output["usage"]
 
             row = {
                 "question": sample.question,
@@ -1119,6 +1393,11 @@ def evaluate_dataset(
                 "correct": None if sample.answer is None else pred_label == sample.answer,
                 "final_confidence": output["final"]["confidence"],
                 "final_explanation": output["final"]["final_explanation"],
+                "num_calls": usage["num_calls"],
+                "total_input_tokens": usage["total_input_tokens"],
+                "total_output_tokens": usage["total_output_tokens"],
+                "total_tokens": usage["total_tokens"],
+                "module_usage": usage["by_module"],
                 "trace": output["trace"]
             }
             predictions.append(row)
@@ -1127,6 +1406,13 @@ def evaluate_dataset(
                 total += 1
                 correct += int(pred_label == sample.answer)
 
+            dataset_total_input_tokens += usage["total_input_tokens"]
+            dataset_total_output_tokens += usage["total_output_tokens"]
+            dataset_total_tokens += usage["total_tokens"]
+            dataset_total_calls += usage["num_calls"]
+
+            update_dataset_module_usage(dataset_module_usage, usage["by_module"])
+
             if verbose:
                 acc_so_far = correct / total if total > 0 else 0.0
                 print("#############################################################")
@@ -1134,6 +1420,13 @@ def evaluate_dataset(
                 print("#############################################################")
                 print("prediction:", pred_label)
                 print("gold:", sample.answer)
+                print("num_calls:", usage["num_calls"])
+                print("total_input_tokens:", usage["total_input_tokens"])
+                print("total_output_tokens:", usage["total_output_tokens"])
+                print("total_tokens:", usage["total_tokens"])
+                print("module_a_total_tokens:", usage["by_module"]["module_a"]["total_tokens"])
+                print("self_debate_total_tokens:", usage["by_module"]["self_debate"]["total_tokens"])
+                print("module_d_total_tokens:", usage["by_module"]["module_d"]["total_tokens"])
                 print("#############################################################")
                 print(f"[{idx + 1}/{len(dataset)}] current accuracy = {acc_so_far:.4f}, skipped = {skipped}")
 
@@ -1142,12 +1435,30 @@ def evaluate_dataset(
             print(f"[Error] sample index={idx}, reason={e}")
 
     acc = (correct / total) if total > 0 else None
+    num_processed = len(predictions)
+
+    avg_input_tokens = dataset_total_input_tokens / num_processed if num_processed > 0 else None
+    avg_output_tokens = dataset_total_output_tokens / num_processed if num_processed > 0 else None
+    avg_total_tokens = dataset_total_tokens / num_processed if num_processed > 0 else None
+    avg_num_calls = dataset_total_calls / num_processed if num_processed > 0 else None
+    avg_module_usage = compute_avg_module_usage(dataset_module_usage, num_processed)
 
     return {
         "accuracy": acc,
         "num_evaluated": total,
         "num_correct": correct,
         "num_skipped": skipped,
+        "num_processed": num_processed,
+        "dataset_total_input_tokens": dataset_total_input_tokens,
+        "dataset_total_output_tokens": dataset_total_output_tokens,
+        "dataset_total_tokens": dataset_total_tokens,
+        "dataset_total_calls": dataset_total_calls,
+        "avg_input_tokens": avg_input_tokens,
+        "avg_output_tokens": avg_output_tokens,
+        "avg_total_tokens": avg_total_tokens,
+        "avg_num_calls": avg_num_calls,
+        "dataset_module_usage": dataset_module_usage,
+        "avg_module_usage": avg_module_usage,
         "results": predictions
     }
 
@@ -1200,6 +1511,25 @@ if __name__ == "__main__":
     print("Num evaluated:", result["num_evaluated"])
     print("Num correct:", result["num_correct"])
     print("Num skipped:", result["num_skipped"])
+    print("Num processed:", result["num_processed"])
+    print("Dataset total input tokens:", result["dataset_total_input_tokens"])
+    print("Dataset total output tokens:", result["dataset_total_output_tokens"])
+    print("Dataset total tokens:", result["dataset_total_tokens"])
+    print("Dataset total calls:", result["dataset_total_calls"])
+    print("Avg input tokens:", result["avg_input_tokens"])
+    print("Avg output tokens:", result["avg_output_tokens"])
+    print("Avg total tokens:", result["avg_total_tokens"])
+    print("Avg num calls:", result["avg_num_calls"])
+
+    print("\n===== Dataset Module Usage =====")
+    print("Module A:", result["dataset_module_usage"]["module_a"])
+    print("Self Debate:", result["dataset_module_usage"]["self_debate"])
+    print("Module D:", result["dataset_module_usage"]["module_d"])
+
+    print("\n===== Avg Module Usage =====")
+    print("Module A:", result["avg_module_usage"]["module_a"])
+    print("Self Debate:", result["avg_module_usage"]["self_debate"])
+    print("Module D:", result["avg_module_usage"]["module_d"])
 
     save_results_json(result, "ets_accounting_test.json")
     print("Saved results to ets_accounting_test.json")

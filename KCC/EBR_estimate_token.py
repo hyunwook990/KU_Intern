@@ -1,4 +1,3 @@
-# 선택지 전부 입력, 하나씩 제거
 import re
 import json
 import torch
@@ -33,7 +32,7 @@ def load_model(model_name: str = MODEL_NAME):
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
-        )
+    )
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -62,7 +61,6 @@ def convert_item_to_sample(item: dict) -> MCQSample:
 
     answer = item.get("answer", None)
 
-    # answer가 정수라고 가정
     if answer is not None:
         answer = int(answer)
         if 1 <= answer <= 4:
@@ -116,37 +114,6 @@ def build_elimination_prompt(
     active_indices: List[int]
 ) -> str:
     option_text = format_options(active_indices, options)
-    
-    ko_prompt = f"""
-당신은 객관식 문제를 "제거 방식"으로 푸는 전문가입니다.
-
-작업:
-1. 문제를 주의 깊게 읽으세요.
-2. 현재 남아 있는 선택지만 고려하세요.
-3. 각 선택지 중 덜 타당한 것을 간단히 설명하세요.
-4. 가장 가능성이 낮은 선택지 하나를 반드시 제거하세요.
-5. 아래 형식을 정확히 따르세요.
-
-형식:
-Reasoning: <간단한 설명>
-Eliminate: <선택지 라벨>
-
-예시:
-Reasoning: B는 문제 조건과 맞지 않으므로 가장 가능성이 낮습니다.
-Eliminate: B
-
-문제:
-{question}
-
-현재 남은 선택지:
-{option_text}
-
-중요:
-- 반드시 하나의 선택지만 제거하세요.
-- Reasoning과 Eliminate 형식을 반드시 지키세요.
-- "Eliminate" 키워드는 영어 그대로 사용하세요.
-- 다른 텍스트는 추가하지 마세요.
-""".strip()
 
     prompt = f"""
 You are solving a multiple-choice question by process of elimination.
@@ -177,7 +144,7 @@ Current remaining options:
 
 
 # -------------------------------
-# 6. 텍스트 생성
+# 6. 텍스트 생성 + 토큰 수 측정
 # -------------------------------
 def generate_text(
     model,
@@ -186,7 +153,7 @@ def generate_text(
     max_new_tokens: int = 512,
     temperature: float = 0.2,
     top_p: float = 0.9
-) -> str:
+) -> Tuple[str, int, int, int]:
     messages = [{"role": "user", "content": prompt}]
 
     model_inputs = tokenizer.apply_chat_template(
@@ -199,6 +166,8 @@ def generate_text(
     model_inputs = {k: v.to(model.device) for k, v in model_inputs.items()}
     input_ids = model_inputs["input_ids"]
     attention_mask = model_inputs["attention_mask"]
+
+    input_tokens = input_ids.shape[-1]
 
     with torch.no_grad():
         outputs = model.generate(
@@ -213,8 +182,11 @@ def generate_text(
         )
 
     generated = outputs[0][input_ids.shape[-1]:]
+    output_tokens = generated.shape[-1]
+    total_tokens = input_tokens + output_tokens
+
     text = tokenizer.decode(generated, skip_special_tokens=True)
-    return text.strip()
+    return text.strip(), input_tokens, output_tokens, total_tokens
 
 
 # -------------------------------
@@ -242,7 +214,6 @@ def parse_elimination_decision(
             if label in valid_labels:
                 return valid_labels[label]
 
-    # 혹시 형식이 조금 어긋나면 마지막 등장 알파벳을 사용
     candidates = re.findall(r"\b([A-Z])\b", response_text.upper())
     for c in reversed(candidates):
         if c in valid_labels:
@@ -261,14 +232,16 @@ def eliminate_one_option(
     options: List[str],
     current_option_set: List[int],
     verbose: bool = True
-) -> Tuple[List[int], str, Optional[int]]:
+) -> Tuple[List[int], str, Optional[int], int, int, int]:
     prompt = build_elimination_prompt(
         question=question,
         options=options,
         active_indices=current_option_set
     )
 
-    reasoning = generate_text(model, tokenizer, prompt)
+    reasoning, input_tokens, output_tokens, total_tokens = generate_text(
+        model, tokenizer, prompt
+    )
     eliminated_idx = parse_elimination_decision(reasoning, current_option_set)
 
     if eliminated_idx is None:
@@ -281,13 +254,14 @@ def eliminate_one_option(
         remaining_labels = [chr(ord("A") + i) for i in next_option_set]
 
         print("=" * 60)
-        # print("[Model reasoning]")
-        # print(reasoning)
         print(f"\nEliminated: {eliminated_label}")
         print(f"Remaining: {remaining_labels}")
+        print(f"Input tokens: {input_tokens}")
+        print(f"Output tokens: {output_tokens}")
+        print(f"Total tokens: {total_tokens}")
         print("=" * 60)
 
-    return next_option_set, reasoning, eliminated_idx
+    return next_option_set, reasoning, eliminated_idx, input_tokens, output_tokens, total_tokens
 
 
 # -------------------------------
@@ -304,11 +278,23 @@ def solve_by_iterative_elimination(
     history = []
     step = 0
 
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_tokens = 0
+    num_calls = 0
+
     while len(current_option_set) > 1:
         if verbose:
             print(f"\n[Step {step}]")
 
-        next_option_set, reasoning, eliminated_idx = eliminate_one_option(
+        (
+            next_option_set,
+            reasoning,
+            eliminated_idx,
+            input_tokens,
+            output_tokens,
+            step_total_tokens
+        ) = eliminate_one_option(
             model=model,
             tokenizer=tokenizer,
             question=question,
@@ -323,8 +309,16 @@ def solve_by_iterative_elimination(
             "reasoning": reasoning,
             "eliminated_idx": eliminated_idx,
             "eliminated_label": chr(ord("A") + eliminated_idx),
-            "next_option_set": next_option_set.copy()
+            "next_option_set": next_option_set.copy(),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": step_total_tokens
         })
+
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+        total_tokens += step_total_tokens
+        num_calls += 1
 
         current_option_set = next_option_set
         step += 1
@@ -335,7 +329,11 @@ def solve_by_iterative_elimination(
         "predicted_index": final_idx,
         "predicted_label": chr(ord("A") + final_idx),
         "predicted_text": options[final_idx],
-        "history": history
+        "history": history,
+        "num_calls": num_calls,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_tokens": total_tokens
     }
 
 
@@ -363,7 +361,11 @@ def evaluate_sample(model, tokenizer, sample: MCQSample, verbose: bool = False) 
         "predicted_label": pred["predicted_label"],
         "predicted_text": pred["predicted_text"],
         "correct": is_correct,
-        "history": pred["history"]
+        "history": pred["history"],
+        "num_calls": pred["num_calls"],
+        "total_input_tokens": pred["total_input_tokens"],
+        "total_output_tokens": pred["total_output_tokens"],
+        "total_tokens": pred["total_tokens"]
     }
 
 
@@ -382,6 +384,11 @@ def evaluate_dataset(
     correct = 0
     skipped = 0
 
+    dataset_total_input_tokens = 0
+    dataset_total_output_tokens = 0
+    dataset_total_tokens = 0
+    dataset_total_calls = 0
+
     for idx, sample in enumerate(dataset):
         try:
             result = evaluate_sample(model, tokenizer, sample, verbose=verbose)
@@ -391,11 +398,18 @@ def evaluate_dataset(
                 total += 1
                 correct += int(result["correct"])
 
+            dataset_total_input_tokens += result["total_input_tokens"]
+            dataset_total_output_tokens += result["total_output_tokens"]
+            dataset_total_tokens += result["total_tokens"]
+            dataset_total_calls += result["num_calls"]
+
             if verbose:
                 acc = correct / total if total > 0 else 0.0
                 print("predicted_label:", result["predicted_label"])
-                print("gold:",chr(ord("A")+sample.answer))
-                print("="*60)
+                print("gold:", chr(ord("A") + sample.answer))
+                print(f"sample_num_calls: {result['num_calls']}")
+                print(f"sample_total_tokens: {result['total_tokens']}")
+                print("=" * 60)
                 print(f"[{idx+1}/{len(dataset)}] accuracy={acc:.4f}, skipped={skipped}")
 
         except Exception as e:
@@ -403,13 +417,37 @@ def evaluate_dataset(
             print(f"[Error] sample index={idx}, reason={e}")
 
     accuracy = correct / total if total > 0 else None
+    num_processed = len(results)
+
+    avg_input_tokens = dataset_total_input_tokens / num_processed if num_processed > 0 else None
+    avg_output_tokens = dataset_total_output_tokens / num_processed if num_processed > 0 else None
+    avg_total_tokens = dataset_total_tokens / num_processed if num_processed > 0 else None
+    avg_num_calls = dataset_total_calls / num_processed if num_processed > 0 else None
+
     print("accuracy:", accuracy)
+    print("dataset_total_input_tokens:", dataset_total_input_tokens)
+    print("dataset_total_output_tokens:", dataset_total_output_tokens)
+    print("dataset_total_tokens:", dataset_total_tokens)
+    print("dataset_total_calls:", dataset_total_calls)
+    print("avg_input_tokens:", avg_input_tokens)
+    print("avg_output_tokens:", avg_output_tokens)
+    print("avg_total_tokens:", avg_total_tokens)
+    print("avg_num_calls:", avg_num_calls)
 
     output = {
         "accuracy": accuracy,
         "num_evaluated": total,
         "num_correct": correct,
         "num_skipped": skipped,
+        "num_processed": num_processed,
+        "dataset_total_input_tokens": dataset_total_input_tokens,
+        "dataset_total_output_tokens": dataset_total_output_tokens,
+        "dataset_total_tokens": dataset_total_tokens,
+        "dataset_total_calls": dataset_total_calls,
+        "avg_input_tokens": avg_input_tokens,
+        "avg_output_tokens": avg_output_tokens,
+        "avg_total_tokens": avg_total_tokens,
+        "avg_num_calls": avg_num_calls,
         "results": results
     }
 
@@ -448,6 +486,15 @@ def main():
     print("Num evaluated:", result["num_evaluated"])
     print("Num correct:", result["num_correct"])
     print("Num skipped:", result["num_skipped"])
+    print("Num processed:", result["num_processed"])
+    print("Dataset total input tokens:", result["dataset_total_input_tokens"])
+    print("Dataset total output tokens:", result["dataset_total_output_tokens"])
+    print("Dataset total tokens:", result["dataset_total_tokens"])
+    print("Dataset total calls:", result["dataset_total_calls"])
+    print("Avg input tokens:", result["avg_input_tokens"])
+    print("Avg output tokens:", result["avg_output_tokens"])
+    print("Avg total tokens:", result["avg_total_tokens"])
+    print("Avg num calls:", result["avg_num_calls"])
 
 
 if __name__ == "__main__":
