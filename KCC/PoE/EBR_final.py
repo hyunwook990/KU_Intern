@@ -6,6 +6,26 @@ from dataclasses import dataclass
 from datasets import load_dataset, get_dataset_config_names
 from typing import List, Dict, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from collections import defaultdict
+
+
+# -------------------------------
+# 0. 예외 클래스
+# -------------------------------
+class EvaluationError(Exception):
+    def __init__(
+        self,
+        message: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: int = 0,
+        num_calls: int = 0
+    ):
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.total_tokens = total_tokens
+        self.num_calls = num_calls
 
 
 # -------------------------------
@@ -52,7 +72,7 @@ def load_model(model_name: str = MODEL_NAME):
 # -------------------------------
 # 4. 데이터셋 로드
 # -------------------------------
-def convert_item_to_sample(item: dict, subject: Optional[str]=None) -> MCQSample:
+def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> MCQSample:
     question = str(item["question"]).strip()
     options = [
         str(item["A"]).strip(),
@@ -81,6 +101,7 @@ def convert_item_to_sample(item: dict, subject: Optional[str]=None) -> MCQSample
 def get_all_subjects(dataset_name="HAERAE-HUB/KMMLU"):
     return get_dataset_config_names(dataset_name)
 
+
 def load_kmmlu_dataset_random(
     dataset_name: str,
     subject: str,
@@ -92,9 +113,8 @@ def load_kmmlu_dataset_random(
 
     indices = list(range(len(ds)))
     random.shuffle(indices)
-    
-    num_samples=min(num_samples, len(ds))
 
+    num_samples = min(num_samples, len(ds))
     selected_indices = indices[:num_samples]
 
     samples = []
@@ -107,6 +127,7 @@ def load_kmmlu_dataset_random(
 
     return samples
 
+
 def load_all_subjects_random(
     dataset_name="HAERAE-HUB/KMMLU",
     split="test",
@@ -114,12 +135,9 @@ def load_all_subjects_random(
 ) -> List[MCQSample]:
 
     subjects = get_all_subjects(dataset_name)
-
     all_samples = []
 
     for subject in subjects:
-        print(f"Loading subject: {subject}")
-
         try:
             samples = load_kmmlu_dataset_random(
                 dataset_name=dataset_name,
@@ -127,12 +145,11 @@ def load_all_subjects_random(
                 split=split,
                 num_samples=num_samples_per_subject
             )
-
             all_samples.extend(samples)
-
         except Exception as e:
             print(f"[Skip Subject] {subject}, reason={e}")
 
+    print(f"Loaded all subjects\nTotal subjects: {len(subjects)}")
     return all_samples
 
 
@@ -284,7 +301,13 @@ def eliminate_one_option(
     eliminated_idx = parse_elimination_decision(reasoning, current_option_set)
 
     if eliminated_idx is None:
-        raise ValueError(f"제거할 선택지를 파싱하지 못했습니다.\n\n출력:\n{reasoning}")
+        raise EvaluationError(
+            f"제거할 선택지를 파싱하지 못했습니다.\n\n출력:\n{reasoning}",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            num_calls=1
+        )
 
     next_option_set = [idx for idx in current_option_set if idx != eliminated_idx]
 
@@ -326,41 +349,51 @@ def solve_by_iterative_elimination(
         if verbose:
             print(f"\n[Step {step}]")
 
-        (
-            next_option_set,
-            reasoning,
-            eliminated_idx,
-            input_tokens,
-            output_tokens,
-            step_total_tokens
-        ) = eliminate_one_option(
-            model=model,
-            tokenizer=tokenizer,
-            question=question,
-            options=options,
-            current_option_set=current_option_set,
-            verbose=verbose
-        )
+        try:
+            (
+                next_option_set,
+                reasoning,
+                eliminated_idx,
+                input_tokens,
+                output_tokens,
+                step_total_tokens
+            ) = eliminate_one_option(
+                model=model,
+                tokenizer=tokenizer,
+                question=question,
+                options=options,
+                current_option_set=current_option_set,
+                verbose=verbose
+            )
 
-        history.append({
-            "step": step,
-            "current_option_set": current_option_set.copy(),
-            "reasoning": reasoning,
-            "eliminated_idx": eliminated_idx,
-            "eliminated_label": chr(ord("A") + eliminated_idx),
-            "next_option_set": next_option_set.copy(),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": step_total_tokens
-        })
+            history.append({
+                "step": step,
+                "current_option_set": current_option_set.copy(),
+                "reasoning": reasoning,
+                "eliminated_idx": eliminated_idx,
+                "eliminated_label": chr(ord("A") + eliminated_idx),
+                "next_option_set": next_option_set.copy(),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": step_total_tokens
+            })
 
-        total_input_tokens += input_tokens
-        total_output_tokens += output_tokens
-        total_tokens += step_total_tokens
-        num_calls += 1
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            total_tokens += step_total_tokens
+            num_calls += 1
 
-        current_option_set = next_option_set
-        step += 1
+            current_option_set = next_option_set
+            step += 1
+
+        except EvaluationError as e:
+            raise EvaluationError(
+                str(e),
+                input_tokens=total_input_tokens + e.input_tokens,
+                output_tokens=total_output_tokens + e.output_tokens,
+                total_tokens=total_tokens + e.total_tokens,
+                num_calls=num_calls + e.num_calls
+            )
 
     final_idx = current_option_set[0]
 
@@ -417,8 +450,10 @@ def evaluate_dataset(
     tokenizer,
     dataset: List[MCQSample],
     verbose: bool = False,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
 ) -> Dict:
+
+    subject_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     results = []
     total = 0
     correct = 0
@@ -437,6 +472,9 @@ def evaluate_dataset(
             if sample.answer is not None:
                 total += 1
                 correct += int(result["correct"])
+                subject = sample.subject
+                subject_stats[subject]["total"] += 1
+                subject_stats[subject]["correct"] += int(result["correct"])
 
             dataset_total_input_tokens += result["total_input_tokens"]
             dataset_total_output_tokens += result["total_output_tokens"]
@@ -445,17 +483,60 @@ def evaluate_dataset(
 
             if verbose:
                 acc = correct / total if total > 0 else 0.0
+                print("subject:", sample.subject)
+                print("question:", sample.question)
                 print("predicted_label:", result["predicted_label"])
-                print("gold:", chr(ord("A") + sample.answer))
+                print("gold:", None if sample.answer is None else chr(ord("A") + sample.answer))
                 print(f"sample_num_calls: {result['num_calls']}")
                 print(f"sample_total_tokens: {result['total_tokens']}")
                 print("=" * 60)
                 print(f"[{idx+1}/{len(dataset)}] accuracy={acc:.4f}, skipped={skipped}")
 
+        except EvaluationError as e:
+            skipped += 1
+            total += 1
+            subject_stats[sample.subject]["total"] += 1
+
+            dataset_total_input_tokens += e.input_tokens
+            dataset_total_output_tokens += e.output_tokens
+            dataset_total_tokens += e.total_tokens
+            dataset_total_calls += e.num_calls
+
+            print(f"[Error] sample index={idx}, reason={e}")
+            print(
+                f"[Partial Usage Added] "
+                f"input={e.input_tokens}, output={e.output_tokens}, "
+                f"total={e.total_tokens}, calls={e.num_calls}"
+            )
+
         except Exception as e:
             skipped += 1
-            total+=1
+            total += 1
+            subject_stats[sample.subject]["total"] += 1
             print(f"[Error] sample index={idx}, reason={e}")
+
+    # -------------------------------
+    # subject별 accuracy 계산
+    # -------------------------------
+    subject_accuracy = {}
+    print("\n===== Subject-wise Accuracy =====")
+
+    for subject, stats in subject_stats.items():
+        if stats["total"] > 0:
+            acc = stats["correct"] / stats["total"]
+        else:
+            acc = None
+
+        subject_accuracy[subject] = {
+            "accuracy": acc,
+            "total": stats["total"],
+            "correct": stats["correct"]
+        }
+
+        if acc is None:
+            print(f"{subject}: accuracy=None, ({stats['correct']}/{stats['total']})")
+        else:
+            print(f"{subject}: accuracy={acc:.4f}, ({stats['correct']}/{stats['total']})")
 
     accuracy = correct / total if total > 0 else None
     num_processed = len(results)
@@ -489,6 +570,7 @@ def evaluate_dataset(
         "avg_output_tokens": avg_output_tokens,
         "avg_total_tokens": avg_total_tokens,
         "avg_num_calls": avg_num_calls,
+        "subject_accuracy": subject_accuracy,
         "results": results
     }
 
@@ -510,9 +592,9 @@ def main():
     dataset = load_all_subjects_random(
         dataset_name="HAERAE-HUB/KMMLU",
         split="test",
-        num_samples_per_subject=10
+        num_samples_per_subject=50
     )
-    
+
     print(f"Total samples: {len(dataset)}")
 
     result = evaluate_dataset(
@@ -520,7 +602,7 @@ def main():
         tokenizer=tokenizer,
         dataset=dataset,
         verbose=True,
-        # save_path="EBR_est_accounting_test.json"
+        save_path="EBR_final.json"
     )
 
     print("\n===== FINAL RESULT =====")
@@ -537,6 +619,10 @@ def main():
     print("Avg output tokens:", result["avg_output_tokens"])
     print("Avg total tokens:", result["avg_total_tokens"])
     print("Avg num calls:", result["avg_num_calls"])
+
+    print("\n===== Subject-wise Accuracy =====")
+    for subject, stats in result["subject_accuracy"].items():
+        print(subject, stats)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Callable
 import random
 import torch
 from datasets import load_dataset, get_dataset_config_names
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from collections import defaultdict
 
 
 # =========================================================
@@ -111,14 +112,29 @@ class EliminatedOptionRecord:
 
 
 # =========================================================
+# Exception Classes
+# =========================================================
+
+class ModuleExecutionError(Exception):
+    def __init__(self, module_name: str, usage: Dict, message: str, raw_output: Optional[str] = None):
+        super().__init__(message)
+        self.module_name = module_name
+        self.usage = usage
+        self.raw_output = raw_output
+
+
+class PipelineExecutionError(Exception):
+    def __init__(self, message: str, usage: Dict, trace: Optional[List] = None):
+        super().__init__(message)
+        self.usage = usage
+        self.trace = trace if trace is not None else []
+
+
+# =========================================================
 # Prompt Templates
 # =========================================================
 
-# -------------------------------
-# Module A: baseline faithful version
-# Q + O_i only
-# -------------------------------
-MODULE_A_PROMPT_KO = """당신은 객관식 문제의 하나의 선택지만 평가하는 전문가입니다.
+MODULE_A_PROMPT = """당신은 객관식 문제의 하나의 선택지만 평가하는 전문가입니다.
 
 문제:
 {question}
@@ -144,34 +160,7 @@ MODULE_A_PROMPT_KO = """당신은 객관식 문제의 하나의 선택지만 평
 - JSON 이외의 텍스트는 출력하지 마세요.
 """
 
-MODULE_A_PROMPT = """You are evaluating a single answer option in a multiple-choice question.
-Please answer in Korean.
-
-Question:
-{question}
-
-Option:
-{target_label}. {target_option}
-
-Task:
-1. Determine whether this option is correct or incorrect.
-2. Explain your reasoning in 1-3 sentences.
-3. Explicitly identify why this option could be wrong or what limitation it has.
-
-Return ONLY valid JSON:
-{{
-  "rationale": "your explanation",
-  "confidence": 0.0
-}}
-
-Rules:
-- Do NOT assume the option is correct.
-- Evaluate only this option itself.
-- Confidence must represent the probability that THIS option is correct.
-- Do not return markdown or extra text.
-"""
-
-SELF_DEBATE_PROMPT_KO = """당신은 두 개의 선택지를 비교하는 전문가입니다.
+SELF_DEBATE_PROMPT = """당신은 두 개의 선택지를 비교하는 전문가입니다.
 
 문제:
 {question}
@@ -210,50 +199,7 @@ SELF_DEBATE_PROMPT_KO = """당신은 두 개의 선택지를 비교하는 전문
 - JSON 이외의 텍스트는 출력하지 마세요.
 """
 
-SELF_DEBATE_PROMPT = """You are comparing two candidate answers.
-Please answer in Korean.
-
-Question:
-{question}
-
-Option 1:
-{opt1_label}. {opt1_text}
-
-Option 2:
-{opt2_label}. {opt2_text}
-
-Existing rationale:
-- {opt1_label}: {reason1}
-- {opt2_label}: {reason2}
-
-Existing confidence:
-- {opt1_label}: {conf1}
-- {opt2_label}: {conf2}
-
-Task:
-1. Compare the two options carefully.
-2. Identify the key difference between them.
-3. Clearly explain why one is more appropriate.
-4. Explicitly state the limitation of the losing option.
-
-Return ONLY valid JSON:
-{{
-  "winner": "{opt1_label}" or "{opt2_label}",
-  "reason": "your explanation",
-  "confidence": 0.0
-}}
-
-Rules:
-- You MUST explain why the losing option is less appropriate.
-- Avoid vague reasoning.
-- Confidence must reflect how certain the decision is.
-- Do not return markdown or extra text.
-"""
-
-# -------------------------------
-# Module D: summarize prior reasoning
-# -------------------------------
-MODULE_D_PROMPT_KO = """당신은 객관식 문제 풀이 결과를 최종 정리하는 전문가입니다.
+MODULE_D_PROMPT = """당신은 객관식 문제 풀이 결과를 최종 정리하는 전문가입니다.
 
 문제:
 {question}
@@ -279,38 +225,6 @@ MODULE_D_PROMPT_KO = """당신은 객관식 문제 풀이 결과를 최종 정�
 - 새로운 판단을 추가로 만들기보다, 앞 단계의 reasoning을 일관되게 정리하세요.
 - 최종 설명은 정답의 타당성과 다른 선택지가 제외된 이유를 모두 포함해야 합니다.
 - JSON이나 마크다운 없이 일반 텍스트로만 답하세요.
-"""
-
-MODULE_D_PROMPT = """You are finalizing the result of a multiple-choice reasoning process.
-Please answer in Korean.
-
-Question:
-{question}
-
-Chosen final answer:
-{chosen_label}. {chosen_text}
-
-Reasoning for the chosen answer:
-{chosen_rationale}
-
-Previously derived reasons for eliminated options:
-{eliminated_rationales_text}
-
-Previously derived reasons for options that remained but were not finally chosen:
-{other_remaining_rationales_text}
-
-Task:
-1. Briefly summarize why the chosen answer is the most appropriate.
-2. Briefly summarize why the other options were excluded, based on the earlier reasoning.
-3. Keep the explanation concise (2-4 sentences).
-
-Return ONLY plain text explanation.
-
-Rules:
-- Do not re-solve the question from scratch.
-- Do not invent a completely new judgment; summarize the earlier reasoning consistently.
-- The final explanation must include both the justification for the chosen answer and why the other options were excluded.
-- Do not return JSON or markdown.
 """
 
 
@@ -482,7 +396,7 @@ def format_reason_block(
 # 데이터셋 로드
 # =========================================================
 
-def convert_item_to_sample(item: dict, subject: Optional[str]=None) -> QuestionSample:
+def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> QuestionSample:
     options = []
     for key in ["A", "B", "C", "D"]:
         if key in item:
@@ -497,7 +411,8 @@ def convert_item_to_sample(item: dict, subject: Optional[str]=None) -> QuestionS
         answer=answer_to_label(item.get("answer")),
         subject=subject
     )
-    
+
+
 def get_all_subjects(dataset_name: str = "HAERAE-HUB/KMMLU") -> List[str]:
     return get_dataset_config_names(dataset_name)
 
@@ -535,7 +450,6 @@ def load_all_subjects_random(
     all_samples = []
 
     for subject in subjects:
-        print(f"Loading subject: {subject}")
         try:
             samples = load_kmmlu_dataset_random(
                 dataset_name=dataset_name,
@@ -547,12 +461,12 @@ def load_all_subjects_random(
         except Exception as e:
             print(f"[Skip Subject] subject={subject}, reason={e}")
 
+    print(f"Loaded all subject\nTotal subject: {len(subjects)}")
     return all_samples
 
 
 # =========================================================
 # Module A
-# baseline: Q + O_i only
 # =========================================================
 
 class ModuleA:
@@ -596,21 +510,38 @@ class ModuleA:
                 prompt_template=prompt_template,
                 target_idx=target_idx
             )
+
             gen_result = self.llm.generate(prompt, temperature=temperature)
-            parsed = parse_module_a_option_output(
-                gen_result.text,
-                gen_result.input_tokens,
-                gen_result.output_tokens,
-                gen_result.total_tokens
-            )
+
+            # 생성 성공 시점의 토큰은 먼저 누적
+            input_tokens_list.append(gen_result.input_tokens)
+            output_tokens_list.append(gen_result.output_tokens)
+            total_tokens_list.append(gen_result.total_tokens)
+            raw_outputs.append(gen_result.text)
+
+            try:
+                parsed = parse_module_a_option_output(
+                    gen_result.text,
+                    gen_result.input_tokens,
+                    gen_result.output_tokens,
+                    gen_result.total_tokens
+                )
+            except Exception as e:
+                partial_usage = {
+                    "num_calls": len(total_tokens_list),
+                    "input_tokens": sum(input_tokens_list),
+                    "output_tokens": sum(output_tokens_list),
+                    "total_tokens": sum(total_tokens_list)
+                }
+                raise ModuleExecutionError(
+                    module_name="module_a",
+                    usage=partial_usage,
+                    message=f"ModuleA parse failed at option index={target_idx}: {e}",
+                    raw_output=gen_result.text
+                ) from e
 
             rationales.append(parsed.rationale)
             confidences.append(parsed.confidence)
-            raw_outputs.append(parsed.raw_output)
-
-            input_tokens_list.append(parsed.input_tokens)
-            output_tokens_list.append(parsed.output_tokens)
-            total_tokens_list.append(parsed.total_tokens)
 
         return ModuleAResult(
             rationales=rationales,
@@ -785,16 +716,31 @@ def run_self_debate(
     )
 
     gen_result = llm.generate(prompt, temperature=temperature)
-    data = safe_json_loads(gen_result.text)
 
-    winner_label = str(data["winner"]).strip().upper()
-    reason = str(data["reason"]).strip()
-    confidence = clamp_confidence(float(data["confidence"]))
+    try:
+        data = safe_json_loads(gen_result.text)
 
-    if winner_label not in labels:
-        raise ValueError(f"Invalid winner: {winner_label}, valid={labels}")
+        winner_label = str(data["winner"]).strip().upper()
+        reason = str(data["reason"]).strip()
+        confidence = clamp_confidence(float(data["confidence"]))
 
-    winner_local_index = labels.index(winner_label)
+        if winner_label not in labels:
+            raise ValueError(f"Invalid winner: {winner_label}, valid={labels}")
+
+        winner_local_index = labels.index(winner_label)
+
+    except Exception as e:
+        raise ModuleExecutionError(
+            module_name="self_debate",
+            usage={
+                "num_calls": 1,
+                "input_tokens": gen_result.input_tokens,
+                "output_tokens": gen_result.output_tokens,
+                "total_tokens": gen_result.total_tokens
+            },
+            message=f"Self-debate parse failed: {e}",
+            raw_output=gen_result.text
+        ) from e
 
     return SelfDebateResult(
         winner_local_index=winner_local_index,
@@ -809,7 +755,6 @@ def run_self_debate(
 
 # =========================================================
 # Module D
-# summarize prior reasoning + calibrate confidence
 # =========================================================
 
 class ModuleD:
@@ -899,11 +844,26 @@ class ModuleD:
         )
 
         gen_result = self.llm.generate(prompt, temperature=temperature)
-        calibrated_confidence = clamp_confidence(self.calibration_fn(chosen_confidence))
+
+        try:
+            final_explanation = gen_result.text.strip()
+            calibrated_confidence = clamp_confidence(self.calibration_fn(chosen_confidence))
+        except Exception as e:
+            raise ModuleExecutionError(
+                module_name="module_d",
+                usage={
+                    "num_calls": 1,
+                    "input_tokens": gen_result.input_tokens,
+                    "output_tokens": gen_result.output_tokens,
+                    "total_tokens": gen_result.total_tokens
+                },
+                message=f"ModuleD failed after generation: {e}",
+                raw_output=gen_result.text
+            ) from e
 
         return ModuleDResult(
             final_answer_label=chosen_label,
-            final_explanation=gen_result.text.strip(),
+            final_explanation=final_explanation,
             calibrated_confidence=calibrated_confidence,
             raw_output=gen_result.text,
             input_tokens=gen_result.input_tokens,
@@ -1027,6 +987,25 @@ class EliminationPipeline:
         usage["by_module"][module_name]["output_tokens"] += output_tokens
         usage["by_module"][module_name]["total_tokens"] += total_tokens
 
+    def _add_partial_module_usage_from_error(
+        self,
+        usage: Dict,
+        err: ModuleExecutionError
+    ) -> None:
+        module_name = err.module_name
+        if module_name not in usage["by_module"]:
+            raise ValueError(f"Unknown module_name in ModuleExecutionError: {module_name}")
+
+        usage["num_calls"] += err.usage["num_calls"]
+        usage["total_input_tokens"] += err.usage["input_tokens"]
+        usage["total_output_tokens"] += err.usage["output_tokens"]
+        usage["total_tokens"] += err.usage["total_tokens"]
+
+        usage["by_module"][module_name]["num_calls"] += err.usage["num_calls"]
+        usage["by_module"][module_name]["input_tokens"] += err.usage["input_tokens"]
+        usage["by_module"][module_name]["output_tokens"] += err.usage["output_tokens"]
+        usage["by_module"][module_name]["total_tokens"] += err.usage["total_tokens"]
+
     def run(
         self,
         sample: QuestionSample,
@@ -1043,228 +1022,259 @@ class EliminationPipeline:
         eliminated_records: List[EliminatedOptionRecord] = []
         sample_usage = self._init_usage()
 
-        while True:
-            a_result = self.module_a.run(
-                question=sample.question,
-                options=current_options,
-                prompt_template=actual_prompt_template,
-                temperature=temperature
-            )
-
-            self._add_module_usage(
-                usage=sample_usage,
-                module_name="module_a",
-                num_calls=a_result.num_calls,
-                input_tokens=a_result.total_input_tokens,
-                output_tokens=a_result.total_output_tokens,
-                total_tokens=a_result.total_tokens
-            )
-
-            b_result = self.module_b.run(
-                options=current_options,
-                confidences=a_result.confidences
-            )
-
-            newly_eliminated = self._collect_newly_eliminated_records(
-                current_options=current_options,
-                current_global_indices=current_global_indices,
-                rationales=a_result.rationales,
-                confidences=a_result.confidences,
-                elimination_mask=b_result.elimination_mask,
-                count=count
-            )
-            eliminated_records.extend(newly_eliminated)
-
-            remaining_local_indices = b_result.remaining_indices
-            remaining_global_indices = self._subset_by_indices(current_global_indices, remaining_local_indices)
-            remaining_labels = self._labels_from_global_indices(remaining_global_indices)
-            remaining_options = self._subset_by_indices(current_options, remaining_local_indices)
-            remaining_confidences = self._subset_by_indices(a_result.confidences, remaining_local_indices)
-            remaining_rationales = self._subset_by_indices(a_result.rationales, remaining_local_indices)
-
-            c_result = self.module_c.run(
-                remaining_indices=remaining_global_indices,
-                remaining_confidences=remaining_confidences,
-                count=count
-            )
-
-            trace.append({
-                "count": count,
-                "current_options": current_options,
-                "current_global_indices": current_global_indices,
-                "module_a": {
-                    "rationales": a_result.rationales,
-                    "confidences": a_result.confidences,
-                    "raw_outputs": a_result.raw_outputs,
-                    "input_tokens_list": a_result.input_tokens_list,
-                    "output_tokens_list": a_result.output_tokens_list,
-                    "total_tokens_list": a_result.total_tokens_list,
-                    "num_calls": a_result.num_calls,
-                    "total_input_tokens": a_result.total_input_tokens,
-                    "total_output_tokens": a_result.total_output_tokens,
-                    "total_tokens": a_result.total_tokens
-                },
-                "module_b": {
-                    "elimination_mask": b_result.elimination_mask,
-                    "remaining_local_indices": remaining_local_indices,
-                    "remaining_global_indices": remaining_global_indices,
-                    "remaining_labels": remaining_labels,
-                    "newly_eliminated": [
-                        {
-                            "label": r.label,
-                            "option_text": r.option_text,
-                            "rationale": r.rationale,
-                            "confidence": r.confidence,
-                            "eliminated_round": r.eliminated_round
-                        } for r in newly_eliminated
-                    ]
-                },
-                "module_c": {
-                    "next_action": c_result.next_action,
-                    "top_confidence": c_result.top_confidence,
-                    "second_confidence": c_result.second_confidence,
-                    "confidence_gap": c_result.confidence_gap,
-                    "reason": c_result.reason
-                },
-                "running_usage": {
-                    "num_calls": sample_usage["num_calls"],
-                    "total_input_tokens": sample_usage["total_input_tokens"],
-                    "total_output_tokens": sample_usage["total_output_tokens"],
-                    "total_tokens": sample_usage["total_tokens"],
-                    "by_module": {
-                        "module_a": dict(sample_usage["by_module"]["module_a"]),
-                        "self_debate": dict(sample_usage["by_module"]["self_debate"]),
-                        "module_d": dict(sample_usage["by_module"]["module_d"])
-                    }
-                }
-            })
-
-            if len(remaining_local_indices) == 0:
-                fallback_local_idx = max(range(len(a_result.confidences)), key=lambda i: a_result.confidences[i])
-                fallback_global_index = current_global_indices[fallback_local_idx]
-                fallback_label = option_label(fallback_global_index)
-                fallback_option = current_options[fallback_local_idx]
-                fallback_rationale = a_result.rationales[fallback_local_idx]
-                fallback_confidence = a_result.confidences[fallback_local_idx]
-
-                trace[-1]["fallback"] = {
-                    "fallback_local_idx": fallback_local_idx,
-                    "fallback_global_index": fallback_global_index,
-                    "fallback_label": fallback_label,
-                    "fallback_confidence": fallback_confidence
-                }
-
-                d_eliminated_records = [
-                    r for r in eliminated_records
-                    if r.global_index != fallback_global_index
-                ]
-
-                d_result = self.module_d.run(
+        try:
+            while True:
+                a_result = self.module_a.run(
                     question=sample.question,
-                    remaining_labels=[fallback_label],
-                    remaining_options=[fallback_option],
-                    rationales=[fallback_rationale],
-                    confidences=[fallback_confidence],
-                    eliminated_records=d_eliminated_records,
+                    options=current_options,
+                    prompt_template=actual_prompt_template,
                     temperature=temperature
                 )
 
                 self._add_module_usage(
                     usage=sample_usage,
-                    module_name="module_d",
-                    num_calls=d_result.num_calls,
-                    input_tokens=d_result.input_tokens,
-                    output_tokens=d_result.output_tokens,
-                    total_tokens=d_result.total_tokens
+                    module_name="module_a",
+                    num_calls=a_result.num_calls,
+                    input_tokens=a_result.total_input_tokens,
+                    output_tokens=a_result.total_output_tokens,
+                    total_tokens=a_result.total_tokens
                 )
 
-                return {
-                    "trace": trace,
-                    "final": {
-                        "answer_label": d_result.final_answer_label,
-                        "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
-                        "final_explanation": d_result.final_explanation,
-                        "confidence": d_result.calibrated_confidence
+                b_result = self.module_b.run(
+                    options=current_options,
+                    confidences=a_result.confidences
+                )
+
+                newly_eliminated = self._collect_newly_eliminated_records(
+                    current_options=current_options,
+                    current_global_indices=current_global_indices,
+                    rationales=a_result.rationales,
+                    confidences=a_result.confidences,
+                    elimination_mask=b_result.elimination_mask,
+                    count=count
+                )
+                eliminated_records.extend(newly_eliminated)
+
+                remaining_local_indices = b_result.remaining_indices
+                remaining_global_indices = self._subset_by_indices(current_global_indices, remaining_local_indices)
+                remaining_labels = self._labels_from_global_indices(remaining_global_indices)
+                remaining_options = self._subset_by_indices(current_options, remaining_local_indices)
+                remaining_confidences = self._subset_by_indices(a_result.confidences, remaining_local_indices)
+                remaining_rationales = self._subset_by_indices(a_result.rationales, remaining_local_indices)
+
+                c_result = self.module_c.run(
+                    remaining_indices=remaining_global_indices,
+                    remaining_confidences=remaining_confidences,
+                    count=count
+                )
+
+                trace.append({
+                    "count": count,
+                    "current_options": current_options,
+                    "current_global_indices": current_global_indices,
+                    "module_a": {
+                        "rationales": a_result.rationales,
+                        "confidences": a_result.confidences,
+                        "raw_outputs": a_result.raw_outputs,
+                        "input_tokens_list": a_result.input_tokens_list,
+                        "output_tokens_list": a_result.output_tokens_list,
+                        "total_tokens_list": a_result.total_tokens_list,
+                        "num_calls": a_result.num_calls,
+                        "total_input_tokens": a_result.total_input_tokens,
+                        "total_output_tokens": a_result.total_output_tokens,
+                        "total_tokens": a_result.total_tokens
                     },
-                    "usage": sample_usage
-                }
+                    "module_b": {
+                        "elimination_mask": b_result.elimination_mask,
+                        "remaining_local_indices": remaining_local_indices,
+                        "remaining_global_indices": remaining_global_indices,
+                        "remaining_labels": remaining_labels,
+                        "newly_eliminated": [
+                            {
+                                "label": r.label,
+                                "option_text": r.option_text,
+                                "rationale": r.rationale,
+                                "confidence": r.confidence,
+                                "eliminated_round": r.eliminated_round
+                            } for r in newly_eliminated
+                        ]
+                    },
+                    "module_c": {
+                        "next_action": c_result.next_action,
+                        "top_confidence": c_result.top_confidence,
+                        "second_confidence": c_result.second_confidence,
+                        "confidence_gap": c_result.confidence_gap,
+                        "reason": c_result.reason
+                    },
+                    "running_usage": {
+                        "num_calls": sample_usage["num_calls"],
+                        "total_input_tokens": sample_usage["total_input_tokens"],
+                        "total_output_tokens": sample_usage["total_output_tokens"],
+                        "total_tokens": sample_usage["total_tokens"],
+                        "by_module": {
+                            "module_a": dict(sample_usage["by_module"]["module_a"]),
+                            "self_debate": dict(sample_usage["by_module"]["self_debate"]),
+                            "module_d": dict(sample_usage["by_module"]["module_d"])
+                        }
+                    }
+                })
 
-            if c_result.next_action == "eliminate_more":
-                current_options = remaining_options
-                current_global_indices = remaining_global_indices
-                count += 1
-                continue
+                if len(remaining_local_indices) == 0:
+                    fallback_local_idx = max(range(len(a_result.confidences)), key=lambda i: a_result.confidences[i])
+                    fallback_global_index = current_global_indices[fallback_local_idx]
+                    fallback_label = option_label(fallback_global_index)
+                    fallback_option = current_options[fallback_local_idx]
+                    fallback_rationale = a_result.rationales[fallback_local_idx]
+                    fallback_confidence = a_result.confidences[fallback_local_idx]
 
-            if c_result.next_action == "self_debate":
-                if len(remaining_options) == 2:
-                    debate_local_indices = [0, 1]
-                else:
-                    debate_local_indices = self._select_top2_local_indices(remaining_confidences)
+                    trace[-1]["fallback"] = {
+                        "fallback_local_idx": fallback_local_idx,
+                        "fallback_global_index": fallback_global_index,
+                        "fallback_label": fallback_label,
+                        "fallback_confidence": fallback_confidence
+                    }
 
-                debate_options = [remaining_options[i] for i in debate_local_indices]
-                debate_labels = [remaining_labels[i] for i in debate_local_indices]
-                debate_rationales = [remaining_rationales[i] for i in debate_local_indices]
-                debate_confidences = [remaining_confidences[i] for i in debate_local_indices]
-                debate_global_indices = [remaining_global_indices[i] for i in debate_local_indices]
+                    d_eliminated_records = [
+                        r for r in eliminated_records
+                        if r.global_index != fallback_global_index
+                    ]
 
-                debate_result = run_self_debate(
-                    llm=self.llm,
-                    question=sample.question,
-                    options=debate_options,
-                    labels=debate_labels,
-                    rationales=debate_rationales,
-                    confidences=debate_confidences,
-                    temperature=temperature
-                )
-
-                self._add_module_usage(
-                    usage=sample_usage,
-                    module_name="self_debate",
-                    num_calls=debate_result.num_calls,
-                    input_tokens=debate_result.input_tokens,
-                    output_tokens=debate_result.output_tokens,
-                    total_tokens=debate_result.total_tokens
-                )
-
-                winner_local_idx = debate_result.winner_local_index
-                loser_local_idx = 1 - winner_local_idx if len(debate_local_indices) == 2 else None
-
-                trace[-1]["self_debate"] = {
-                    "candidate_local_indices": debate_local_indices,
-                    "candidate_labels": debate_labels,
-                    "candidate_options": debate_options,
-                    "candidate_rationales": debate_rationales,
-                    "candidate_confidences": debate_confidences,
-                    "winner_label": debate_labels[winner_local_idx],
-                    "winner_option": debate_options[winner_local_idx],
-                    "reason": debate_result.reason,
-                    "confidence": debate_result.confidence,
-                    "raw_output": debate_result.raw_output,
-                    "input_tokens": debate_result.input_tokens,
-                    "output_tokens": debate_result.output_tokens,
-                    "total_tokens": debate_result.total_tokens
-                }
-
-                d_eliminated_records = list(eliminated_records)
-                if loser_local_idx is not None:
-                    d_eliminated_records.append(
-                        EliminatedOptionRecord(
-                            global_index=debate_global_indices[loser_local_idx],
-                            label=debate_labels[loser_local_idx],
-                            option_text=debate_options[loser_local_idx],
-                            rationale=debate_rationales[loser_local_idx],
-                            confidence=debate_confidences[loser_local_idx],
-                            eliminated_round=count
-                        )
+                    d_result = self.module_d.run(
+                        question=sample.question,
+                        remaining_labels=[fallback_label],
+                        remaining_options=[fallback_option],
+                        rationales=[fallback_rationale],
+                        confidences=[fallback_confidence],
+                        eliminated_records=d_eliminated_records,
+                        temperature=temperature
                     )
 
+                    self._add_module_usage(
+                        usage=sample_usage,
+                        module_name="module_d",
+                        num_calls=d_result.num_calls,
+                        input_tokens=d_result.input_tokens,
+                        output_tokens=d_result.output_tokens,
+                        total_tokens=d_result.total_tokens
+                    )
+
+                    return {
+                        "trace": trace,
+                        "final": {
+                            "answer_label": d_result.final_answer_label,
+                            "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
+                            "final_explanation": d_result.final_explanation,
+                            "confidence": d_result.calibrated_confidence
+                        },
+                        "usage": sample_usage
+                    }
+
+                if c_result.next_action == "eliminate_more":
+                    current_options = remaining_options
+                    current_global_indices = remaining_global_indices
+                    count += 1
+                    continue
+
+                if c_result.next_action == "self_debate":
+                    if len(remaining_options) == 2:
+                        debate_local_indices = [0, 1]
+                    else:
+                        debate_local_indices = self._select_top2_local_indices(remaining_confidences)
+
+                    debate_options = [remaining_options[i] for i in debate_local_indices]
+                    debate_labels = [remaining_labels[i] for i in debate_local_indices]
+                    debate_rationales = [remaining_rationales[i] for i in debate_local_indices]
+                    debate_confidences = [remaining_confidences[i] for i in debate_local_indices]
+                    debate_global_indices = [remaining_global_indices[i] for i in debate_local_indices]
+
+                    debate_result = run_self_debate(
+                        llm=self.llm,
+                        question=sample.question,
+                        options=debate_options,
+                        labels=debate_labels,
+                        rationales=debate_rationales,
+                        confidences=debate_confidences,
+                        temperature=temperature
+                    )
+
+                    self._add_module_usage(
+                        usage=sample_usage,
+                        module_name="self_debate",
+                        num_calls=debate_result.num_calls,
+                        input_tokens=debate_result.input_tokens,
+                        output_tokens=debate_result.output_tokens,
+                        total_tokens=debate_result.total_tokens
+                    )
+
+                    winner_local_idx = debate_result.winner_local_index
+                    loser_local_idx = 1 - winner_local_idx if len(debate_local_indices) == 2 else None
+
+                    trace[-1]["self_debate"] = {
+                        "candidate_local_indices": debate_local_indices,
+                        "candidate_labels": debate_labels,
+                        "candidate_options": debate_options,
+                        "candidate_rationales": debate_rationales,
+                        "candidate_confidences": debate_confidences,
+                        "winner_label": debate_labels[winner_local_idx],
+                        "winner_option": debate_options[winner_local_idx],
+                        "reason": debate_result.reason,
+                        "confidence": debate_result.confidence,
+                        "raw_output": debate_result.raw_output,
+                        "input_tokens": debate_result.input_tokens,
+                        "output_tokens": debate_result.output_tokens,
+                        "total_tokens": debate_result.total_tokens
+                    }
+
+                    d_eliminated_records = list(eliminated_records)
+                    if loser_local_idx is not None:
+                        d_eliminated_records.append(
+                            EliminatedOptionRecord(
+                                global_index=debate_global_indices[loser_local_idx],
+                                label=debate_labels[loser_local_idx],
+                                option_text=debate_options[loser_local_idx],
+                                rationale=debate_rationales[loser_local_idx],
+                                confidence=debate_confidences[loser_local_idx],
+                                eliminated_round=count
+                            )
+                        )
+
+                    d_result = self.module_d.run(
+                        question=sample.question,
+                        remaining_labels=[debate_labels[winner_local_idx]],
+                        remaining_options=[debate_options[winner_local_idx]],
+                        rationales=[debate_result.reason],
+                        confidences=[max(debate_confidences[winner_local_idx], debate_result.confidence)],
+                        eliminated_records=d_eliminated_records,
+                        temperature=temperature
+                    )
+
+                    self._add_module_usage(
+                        usage=sample_usage,
+                        module_name="module_d",
+                        num_calls=d_result.num_calls,
+                        input_tokens=d_result.input_tokens,
+                        output_tokens=d_result.output_tokens,
+                        total_tokens=d_result.total_tokens
+                    )
+
+                    return {
+                        "trace": trace,
+                        "final": {
+                            "answer_label": d_result.final_answer_label,
+                            "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
+                            "final_explanation": d_result.final_explanation,
+                            "confidence": d_result.calibrated_confidence
+                        },
+                        "usage": sample_usage
+                    }
+
                 d_result = self.module_d.run(
                     question=sample.question,
-                    remaining_labels=[debate_labels[winner_local_idx]],
-                    remaining_options=[debate_options[winner_local_idx]],
-                    rationales=[debate_result.reason],
-                    confidences=[max(debate_confidences[winner_local_idx], debate_result.confidence)],
-                    eliminated_records=d_eliminated_records,
+                    remaining_labels=remaining_labels,
+                    remaining_options=remaining_options,
+                    rationales=remaining_rationales,
+                    confidences=remaining_confidences,
+                    eliminated_records=eliminated_records,
                     temperature=temperature
                 )
 
@@ -1288,35 +1298,20 @@ class EliminationPipeline:
                     "usage": sample_usage
                 }
 
-            d_result = self.module_d.run(
-                question=sample.question,
-                remaining_labels=remaining_labels,
-                remaining_options=remaining_options,
-                rationales=remaining_rationales,
-                confidences=remaining_confidences,
-                eliminated_records=eliminated_records,
-                temperature=temperature
-            )
-
-            self._add_module_usage(
+        except ModuleExecutionError as e:
+            self._add_partial_module_usage_from_error(sample_usage, e)
+            raise PipelineExecutionError(
+                message=str(e),
                 usage=sample_usage,
-                module_name="module_d",
-                num_calls=d_result.num_calls,
-                input_tokens=d_result.input_tokens,
-                output_tokens=d_result.output_tokens,
-                total_tokens=d_result.total_tokens
-            )
+                trace=trace
+            ) from e
 
-            return {
-                "trace": trace,
-                "final": {
-                    "answer_label": d_result.final_answer_label,
-                    "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
-                    "final_explanation": d_result.final_explanation,
-                    "confidence": d_result.calibrated_confidence
-                },
-                "usage": sample_usage
-            }
+        except Exception as e:
+            raise PipelineExecutionError(
+                message=str(e),
+                usage=sample_usage,
+                trace=trace
+            ) from e
 
 
 # =========================================================
@@ -1354,8 +1349,8 @@ def update_dataset_module_usage(dataset_module_usage: Dict, sample_module_usage:
         dataset_module_usage[module_name]["total_tokens"] += sample_module_usage[module_name]["total_tokens"]
 
 
-def compute_avg_module_usage(dataset_module_usage: Dict, num_processed: int) -> Dict:
-    if num_processed == 0:
+def compute_avg_module_usage(dataset_module_usage: Dict, denominator: int) -> Dict:
+    if denominator == 0:
         return {
             "module_a": {
                 "avg_num_calls": None,
@@ -1380,10 +1375,10 @@ def compute_avg_module_usage(dataset_module_usage: Dict, num_processed: int) -> 
     avg_usage = {}
     for module_name in ["module_a", "self_debate", "module_d"]:
         avg_usage[module_name] = {
-            "avg_num_calls": dataset_module_usage[module_name]["num_calls"] / num_processed,
-            "avg_input_tokens": dataset_module_usage[module_name]["input_tokens"] / num_processed,
-            "avg_output_tokens": dataset_module_usage[module_name]["output_tokens"] / num_processed,
-            "avg_total_tokens": dataset_module_usage[module_name]["total_tokens"] / num_processed
+            "avg_num_calls": dataset_module_usage[module_name]["num_calls"] / denominator,
+            "avg_input_tokens": dataset_module_usage[module_name]["input_tokens"] / denominator,
+            "avg_output_tokens": dataset_module_usage[module_name]["output_tokens"] / denominator,
+            "avg_total_tokens": dataset_module_usage[module_name]["total_tokens"] / denominator
         }
     return avg_usage
 
@@ -1399,6 +1394,10 @@ def evaluate_dataset(
     correct = 0
     total = 0
     skipped = 0
+
+    skipped_samples = []
+
+    subject_stats = defaultdict(lambda: {"total": 0, "correct": 0})
 
     dataset_total_input_tokens = 0
     dataset_total_output_tokens = 0
@@ -1438,6 +1437,8 @@ def evaluate_dataset(
             if sample.answer is not None:
                 total += 1
                 correct += int(pred_label == sample.answer)
+                subject_stats[sample.subject]["total"] += 1
+                subject_stats[sample.subject]["correct"] += int(row["correct"])
 
             dataset_total_input_tokens += usage["total_input_tokens"]
             dataset_total_output_tokens += usage["total_output_tokens"]
@@ -1451,6 +1452,8 @@ def evaluate_dataset(
                 print("#############################################################")
                 print(output["final"]["final_explanation"])
                 print("#############################################################")
+                print("subject", sample.subject)
+                print("question:", sample.question)
                 print("prediction:", pred_label)
                 print("gold:", sample.answer)
                 print("num_calls:", usage["num_calls"])
@@ -1463,25 +1466,95 @@ def evaluate_dataset(
                 print("#############################################################")
                 print(f"[{idx + 1}/{len(dataset)}] current accuracy = {acc_so_far:.4f}, skipped = {skipped}")
 
-        except Exception as e:
+        except PipelineExecutionError as e:
             skipped += 1
+            total += 1
+            subject_stats[sample.subject]["total"] += 1
+
+            dataset_total_input_tokens += e.usage["total_input_tokens"]
+            dataset_total_output_tokens += e.usage["total_output_tokens"]
+            dataset_total_tokens += e.usage["total_tokens"]
+            dataset_total_calls += e.usage["num_calls"]
+
+            update_dataset_module_usage(dataset_module_usage, e.usage["by_module"])
+
+            skipped_samples.append({
+                "index": idx,
+                "subject": sample.subject,
+                "question": sample.question,
+                "options": sample.options,
+                "gold": sample.answer,
+                "error": str(e),
+                "num_calls": e.usage["num_calls"],
+                "total_input_tokens": e.usage["total_input_tokens"],
+                "total_output_tokens": e.usage["total_output_tokens"],
+                "total_tokens": e.usage["total_tokens"],
+                "module_usage": e.usage["by_module"],
+                "trace": e.trace
+            })
+
             print(f"[Error] sample index={idx}, reason={e}")
 
-    acc = (correct / total) if total > 0 else None
-    num_processed = len(predictions)
+        except Exception as e:
+            skipped += 1
+            total += 1
+            subject_stats[sample.subject]["total"] += 1
 
-    avg_input_tokens = dataset_total_input_tokens / num_processed if num_processed > 0 else None
-    avg_output_tokens = dataset_total_output_tokens / num_processed if num_processed > 0 else None
-    avg_total_tokens = dataset_total_tokens / num_processed if num_processed > 0 else None
-    avg_num_calls = dataset_total_calls / num_processed if num_processed > 0 else None
-    avg_module_usage = compute_avg_module_usage(dataset_module_usage, num_processed)
+            skipped_samples.append({
+                "index": idx,
+                "subject": sample.subject,
+                "question": sample.question,
+                "options": sample.options,
+                "gold": sample.answer,
+                "error": str(e),
+                "num_calls": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+                "module_usage": None,
+                "trace": []
+            })
+
+            print(f"[Error] sample index={idx}, reason={e}")
+
+    subject_accuracy = {}
+    print("\n===== Subject-wise Accuracy =====")
+
+    for subject, stats in subject_stats.items():
+        if stats["total"] > 0:
+            acc = stats["correct"] / stats["total"]
+        else:
+            acc = None
+
+        subject_accuracy[subject] = {
+            "accuracy": acc,
+            "total": stats["total"],
+            "correct": stats["correct"]
+        }
+
+        if acc is None:
+            print(f"{subject}: accuracy=None, ({stats['correct']}/{stats['total']})")
+        else:
+            print(f"{subject}: accuracy={acc:.4f}, ({stats['correct']}/{stats['total']})")
+
+    acc = (correct / total) if total > 0 else None
+    num_processed = len(predictions)   # 성공한 샘플 수
+    num_attempted = total             # 성공 + skip 포함
+
+    avg_input_tokens = dataset_total_input_tokens / num_attempted if num_attempted > 0 else None
+    avg_output_tokens = dataset_total_output_tokens / num_attempted if num_attempted > 0 else None
+    avg_total_tokens = dataset_total_tokens / num_attempted if num_attempted > 0 else None
+    avg_num_calls = dataset_total_calls / num_attempted if num_attempted > 0 else None
+    avg_module_usage = compute_avg_module_usage(dataset_module_usage, num_attempted)
 
     return {
         "accuracy": acc,
+        "subject_accuracy": subject_accuracy,
         "num_evaluated": total,
         "num_correct": correct,
         "num_skipped": skipped,
         "num_processed": num_processed,
+        "num_attempted": num_attempted,
         "dataset_total_input_tokens": dataset_total_input_tokens,
         "dataset_total_output_tokens": dataset_total_output_tokens,
         "dataset_total_tokens": dataset_total_tokens,
@@ -1492,7 +1565,8 @@ def evaluate_dataset(
         "avg_num_calls": avg_num_calls,
         "dataset_module_usage": dataset_module_usage,
         "avg_module_usage": avg_module_usage,
-        "results": predictions
+        "results": predictions,
+        "skipped_samples": skipped_samples
     }
 
 
@@ -1508,6 +1582,7 @@ def save_results_json(result: Dict, path: str):
 if __name__ == "__main__":
     random.seed(42)
     torch.manual_seed(42)
+
     llm = HFLLM(
         model_name=MODEL_NAME,
         device_map="auto",
@@ -1517,7 +1592,7 @@ if __name__ == "__main__":
     pipeline = EliminationPipeline(
         llm=llm,
         module_a_prompt_template=MODULE_A_PROMPT,
-        threshold=0.5,
+        threshold=0.4,
         max_count=2,
         tau_answer=0.9,
         debate_gap_threshold=0.05,
@@ -1527,10 +1602,10 @@ if __name__ == "__main__":
     dataset = load_all_subjects_random(
         dataset_name="HAERAE-HUB/KMMLU",
         split="test",
-        num_samples_per_subject=100
+        num_samples_per_subject=50
     )
 
-    print(f"Loaded {len(dataset)} samples")
+    print(f"Total samples: {len(dataset)}")
 
     result = evaluate_dataset(
         pipeline=pipeline,
@@ -1546,6 +1621,7 @@ if __name__ == "__main__":
     print("Num correct:", result["num_correct"])
     print("Num skipped:", result["num_skipped"])
     print("Num processed:", result["num_processed"])
+    print("Num attempted:", result["num_attempted"])
     print("Dataset total input tokens:", result["dataset_total_input_tokens"])
     print("Dataset total output tokens:", result["dataset_total_output_tokens"])
     print("Dataset total tokens:", result["dataset_total_tokens"])
@@ -1565,4 +1641,4 @@ if __name__ == "__main__":
     print("Self Debate:", result["avg_module_usage"]["self_debate"])
     print("Module D:", result["avg_module_usage"]["module_d"])
 
-    save_results_json(result, "ETS_est_accounting_test.json")
+    save_results_json(result, "ETS_final.json")
