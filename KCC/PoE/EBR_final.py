@@ -9,9 +9,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from collections import defaultdict
 
 
-# -------------------------------
+# =========================================================
 # 0. 예외 클래스
-# -------------------------------
+# =========================================================
 class EvaluationError(Exception):
     def __init__(
         self,
@@ -28,28 +28,31 @@ class EvaluationError(Exception):
         self.num_calls = num_calls
 
 
-# -------------------------------
+# =========================================================
 # 1. 설정
-# -------------------------------
+# =========================================================
 MODEL_NAME = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("DEVICE:", DEVICE)
 
+DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TOP_P = 0.95
 
-# -------------------------------
+
+# =========================================================
 # 2. 데이터 구조
-# -------------------------------
+# =========================================================
 @dataclass
 class MCQSample:
     question: str
     options: List[str]              # [A, B, C, D]
-    answer: Optional[int] = None    # 정답 인덱스: 0~3
+    answer: Optional[int] = None    # 0~3
     subject: Optional[str] = None
 
 
-# -------------------------------
+# =========================================================
 # 3. 모델 로드
-# -------------------------------
+# =========================================================
 def load_model(model_name: str = MODEL_NAME):
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
@@ -59,7 +62,7 @@ def load_model(model_name: str = MODEL_NAME):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
-        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         device_map="auto" if torch.cuda.is_available() else None
     )
 
@@ -69,9 +72,9 @@ def load_model(model_name: str = MODEL_NAME):
     return tokenizer, model
 
 
-# -------------------------------
+# =========================================================
 # 4. 데이터셋 로드
-# -------------------------------
+# =========================================================
 def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> MCQSample:
     question = str(item["question"]).strip()
     options = [
@@ -82,7 +85,6 @@ def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> MCQSamp
     ]
 
     answer = item.get("answer", None)
-
     if answer is not None:
         answer = int(answer)
         if 1 <= answer <= 4:
@@ -98,7 +100,7 @@ def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> MCQSamp
     )
 
 
-def get_all_subjects(dataset_name="HAERAE-HUB/KMMLU"):
+def get_all_subjects(dataset_name: str = "HAERAE-HUB/KMMLU") -> List[str]:
     return get_dataset_config_names(dataset_name)
 
 
@@ -108,7 +110,6 @@ def load_kmmlu_dataset_random(
     split: str = "test",
     num_samples: int = 100
 ) -> List[MCQSample]:
-
     ds = load_dataset(dataset_name, subject, split=split)
 
     indices = list(range(len(ds)))
@@ -129,11 +130,10 @@ def load_kmmlu_dataset_random(
 
 
 def load_all_subjects_random(
-    dataset_name="HAERAE-HUB/KMMLU",
-    split="test",
-    num_samples_per_subject=100
+    dataset_name: str = "HAERAE-HUB/KMMLU",
+    split: str = "test",
+    num_samples_per_subject: int = 100
 ) -> List[MCQSample]:
-
     subjects = get_all_subjects(dataset_name)
     all_samples = []
 
@@ -153,18 +153,24 @@ def load_all_subjects_random(
     return all_samples
 
 
-# -------------------------------
-# 5. 프롬프트 구성
-# -------------------------------
+# =========================================================
+# 5. 유틸
+# =========================================================
+def option_label(idx: int) -> str:
+    return chr(ord("A") + idx)
+
+
 def format_options(option_indices: List[int], all_options: List[str]) -> str:
     lines = []
     for idx in option_indices:
-        label = chr(ord("A") + idx)
-        lines.append(f"{label}. {all_options[idx]}")
+        lines.append(f"{option_label(idx)}. {all_options[idx]}")
     return "\n".join(lines)
 
 
-def build_elimination_prompt(
+# =========================================================
+# 6. 프롬프트
+# =========================================================
+def build_ebr_prompt(
     question: str,
     options: List[str],
     active_indices: List[int]
@@ -172,22 +178,20 @@ def build_elimination_prompt(
     option_text = format_options(active_indices, options)
 
     prompt = f"""
-You are solving a multiple-choice question by process of elimination.
+You are solving a multiple-choice question using elimination-based reasoning.
 Please answer in Korean.
 
-Your task:
+Let’s think step by step. We will eliminate incorrect answers one by one.
+
+Instructions:
 1. Read the question carefully.
 2. Consider only the currently remaining options.
-3. Briefly explain why some options are less plausible.
-4. Choose exactly ONE option to eliminate because it is the least plausible.
-5. Use the following format exactly:
-
-Reasoning: <your brief reasoning>
-Eliminate: <OPTION_LABEL>
-
-Example:
-Reasoning: B는 문제 조건에 맞지 않으므로 가장 가능성이 낮습니다.
-Eliminate: B
+3. Briefly compare the remaining options.
+4. Explain why some options are less plausible.
+5. Eliminate exactly ONE option in this step.
+6. Do not give the final answer yet unless only one option remains.
+7. The last line of your response must be exactly:
+Eliminated: <OPTION_LABEL>
 
 Question:
 {question}
@@ -199,16 +203,16 @@ Current remaining options:
     return prompt
 
 
-# -------------------------------
-# 6. 텍스트 생성 + 토큰 수 측정
-# -------------------------------
+# =========================================================
+# 7. 텍스트 생성 + 토큰 측정
+# =========================================================
 def generate_text(
     model,
     tokenizer,
     prompt: str,
     max_new_tokens: int = 512,
-    temperature: float = 0.2,
-    top_p: float = 0.9
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P
 ) -> Tuple[str, int, int, int]:
     messages = [{"role": "user", "content": prompt}]
 
@@ -240,31 +244,35 @@ def generate_text(
     generated = outputs[0][input_ids.shape[-1]:]
     output_tokens = generated.shape[-1]
     total_tokens = input_tokens + output_tokens
+    text = tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    text = tokenizer.decode(generated, skip_special_tokens=True)
-    return text.strip(), input_tokens, output_tokens, total_tokens
+    return text, input_tokens, output_tokens, total_tokens
 
 
-# -------------------------------
-# 7. 제거 선택지 파싱
-# -------------------------------
+# =========================================================
+# 8. 제거 선택지 파싱
+# =========================================================
 def parse_elimination_decision(
     response_text: str,
     active_indices: List[int]
 ) -> Optional[int]:
-    valid_labels = {chr(ord("A") + idx): idx for idx in active_indices}
+    valid_labels = {option_label(idx): idx for idx in active_indices}
 
     patterns = [
+        r"^\s*Eliminated\s*:\s*([A-Z])\s*$",
         r"^\s*Eliminate\s*:\s*([A-Z])\s*$",
+        r"Eliminated\s*:\s*([A-Z])",
         r"Eliminate\s*:\s*([A-Z])",
-        r"eliminate\s+option\s+([A-Z])",
-        r"remove\s+option\s+([A-Z])",
-        r"remove\s+([A-Z])",
-        r"eliminate\s+([A-Z])",
+        r"Therefore[, ]*eliminate\s+([A-Z])",
+        r"So[, ]*eliminate\s+([A-Z])",
+        r"([A-Z])\s*를\s*제거",
+        r"([A-Z])\s*를\s*탈락",
+        r"제거할\s*선택지\s*:\s*([A-Z])",
+        r"제거\s*:\s*([A-Z])",
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, response_text, re.IGNORECASE)
+        match = re.search(pattern, response_text, re.IGNORECASE | re.MULTILINE)
         if match:
             label = match.group(1).upper()
             if label in valid_labels:
@@ -278,26 +286,33 @@ def parse_elimination_decision(
     return None
 
 
-# -------------------------------
-# 8. 한 번에 선택지 1개 제거
-# -------------------------------
+# =========================================================
+# 9. 한 step에서 1개 제거
+# =========================================================
 def eliminate_one_option(
     model,
     tokenizer,
     question: str,
     options: List[str],
     current_option_set: List[int],
-    verbose: bool = True
-) -> Tuple[List[int], str, Optional[int], int, int, int]:
-    prompt = build_elimination_prompt(
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    verbose: bool = False
+) -> Tuple[List[int], str, int, int, int, int]:
+    prompt = build_ebr_prompt(
         question=question,
         options=options,
         active_indices=current_option_set
     )
 
     reasoning, input_tokens, output_tokens, total_tokens = generate_text(
-        model, tokenizer, prompt
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        temperature=temperature,
+        top_p=top_p
     )
+
     eliminated_idx = parse_elimination_decision(reasoning, current_option_set)
 
     if eliminated_idx is None:
@@ -312,31 +327,37 @@ def eliminate_one_option(
     next_option_set = [idx for idx in current_option_set if idx != eliminated_idx]
 
     if verbose:
-        eliminated_label = chr(ord("A") + eliminated_idx)
-        remaining_labels = [chr(ord("A") + i) for i in next_option_set]
-
         print("=" * 60)
-        print(f"\nEliminated: {eliminated_label}")
-        print(f"Remaining: {remaining_labels}")
+        print(f"Eliminated: {option_label(eliminated_idx)}")
+        print(f"Remaining: {[option_label(i) for i in next_option_set]}")
         print(f"Input tokens: {input_tokens}")
         print(f"Output tokens: {output_tokens}")
         print(f"Total tokens: {total_tokens}")
         print("=" * 60)
 
-    return next_option_set, reasoning, eliminated_idx, input_tokens, output_tokens, total_tokens
+    return (
+        next_option_set,
+        reasoning,
+        eliminated_idx,
+        input_tokens,
+        output_tokens,
+        total_tokens
+    )
 
 
-# -------------------------------
-# 9. 반복 제거로 최종 답 선택
-# -------------------------------
-def solve_by_iterative_elimination(
+# =========================================================
+# 10. 단일 EBR path 수행
+# =========================================================
+def solve_by_ebr(
     model,
     tokenizer,
     question: str,
     options: List[str],
-    verbose: bool = True
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    verbose: bool = False
 ) -> Dict:
-    current_option_set = [0, 1, 2, 3]
+    current_option_set = list(range(len(options)))
     history = []
     step = 0
 
@@ -363,16 +384,20 @@ def solve_by_iterative_elimination(
                 question=question,
                 options=options,
                 current_option_set=current_option_set,
+                temperature=temperature,
+                top_p=top_p,
                 verbose=verbose
             )
 
             history.append({
                 "step": step,
                 "current_option_set": current_option_set.copy(),
+                "current_option_labels": [option_label(i) for i in current_option_set],
                 "reasoning": reasoning,
                 "eliminated_idx": eliminated_idx,
-                "eliminated_label": chr(ord("A") + eliminated_idx),
+                "eliminated_label": option_label(eliminated_idx),
                 "next_option_set": next_option_set.copy(),
+                "next_option_labels": [option_label(i) for i in next_option_set],
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": step_total_tokens
@@ -399,25 +424,34 @@ def solve_by_iterative_elimination(
 
     return {
         "predicted_index": final_idx,
-        "predicted_label": chr(ord("A") + final_idx),
+        "predicted_label": option_label(final_idx),
         "predicted_text": options[final_idx],
         "history": history,
         "num_calls": num_calls,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
-        "total_tokens": total_tokens
+        "total_tokens": total_tokens,
     }
 
 
-# -------------------------------
-# 10. 단일 샘플 평가
-# -------------------------------
-def evaluate_sample(model, tokenizer, sample: MCQSample, verbose: bool = False) -> Dict:
-    pred = solve_by_iterative_elimination(
+# =========================================================
+# 11. 단일 샘플 평가
+# =========================================================
+def evaluate_sample(
+    model,
+    tokenizer,
+    sample: MCQSample,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    verbose: bool = False
+) -> Dict:
+    pred = solve_by_ebr(
         model=model,
         tokenizer=tokenizer,
         question=sample.question,
         options=sample.options,
+        temperature=temperature,
+        top_p=top_p,
         verbose=verbose
     )
 
@@ -429,7 +463,7 @@ def evaluate_sample(model, tokenizer, sample: MCQSample, verbose: bool = False) 
         "question": sample.question,
         "options": sample.options,
         "gold_index": sample.answer,
-        "gold_label": None if sample.answer is None else chr(ord("A") + sample.answer),
+        "gold_label": None if sample.answer is None else option_label(sample.answer),
         "predicted_index": predicted_index,
         "predicted_label": pred["predicted_label"],
         "predicted_text": pred["predicted_text"],
@@ -442,19 +476,22 @@ def evaluate_sample(model, tokenizer, sample: MCQSample, verbose: bool = False) 
     }
 
 
-# -------------------------------
-# 11. 데이터셋 전체 평가
-# -------------------------------
+# =========================================================
+# 12. 데이터셋 전체 평가
+# =========================================================
 def evaluate_dataset(
     model,
     tokenizer,
     dataset: List[MCQSample],
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
     verbose: bool = False,
     save_path: Optional[str] = None,
 ) -> Dict:
-
     subject_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     results = []
+    skipped_samples = []
+
     total = 0
     correct = 0
     skipped = 0
@@ -466,15 +503,21 @@ def evaluate_dataset(
 
     for idx, sample in enumerate(dataset):
         try:
-            result = evaluate_sample(model, tokenizer, sample, verbose=verbose)
+            result = evaluate_sample(
+                model=model,
+                tokenizer=tokenizer,
+                sample=sample,
+                temperature=temperature,
+                top_p=top_p,
+                verbose=verbose
+            )
             results.append(result)
 
             if sample.answer is not None:
                 total += 1
                 correct += int(result["correct"])
-                subject = sample.subject
-                subject_stats[subject]["total"] += 1
-                subject_stats[subject]["correct"] += int(result["correct"])
+                subject_stats[sample.subject]["total"] += 1
+                subject_stats[sample.subject]["correct"] += int(result["correct"])
 
             dataset_total_input_tokens += result["total_input_tokens"]
             dataset_total_output_tokens += result["total_output_tokens"]
@@ -486,11 +529,11 @@ def evaluate_dataset(
                 print("subject:", sample.subject)
                 print("question:", sample.question)
                 print("predicted_label:", result["predicted_label"])
-                print("gold:", None if sample.answer is None else chr(ord("A") + sample.answer))
-                print(f"sample_num_calls: {result['num_calls']}")
-                print(f"sample_total_tokens: {result['total_tokens']}")
+                print("gold:", None if sample.answer is None else option_label(sample.answer))
+                print("sample_num_calls:", result["num_calls"])
+                print("sample_total_tokens:", result["total_tokens"])
                 print("=" * 60)
-                print(f"[{idx+1}/{len(dataset)}] accuracy={acc:.4f}, skipped={skipped}")
+                print(f"[{idx + 1}/{len(dataset)}] accuracy={acc:.4f}, skipped={skipped}")
 
         except EvaluationError as e:
             skipped += 1
@@ -501,6 +544,20 @@ def evaluate_dataset(
             dataset_total_output_tokens += e.output_tokens
             dataset_total_tokens += e.total_tokens
             dataset_total_calls += e.num_calls
+
+            skipped_samples.append({
+                "index": idx,
+                "subject": sample.subject,
+                "question": sample.question,
+                "options": sample.options,
+                "gold_index": sample.answer,
+                "gold_label": None if sample.answer is None else option_label(sample.answer),
+                "error": str(e),
+                "num_calls": e.num_calls,
+                "total_input_tokens": e.input_tokens,
+                "total_output_tokens": e.output_tokens,
+                "total_tokens": e.total_tokens
+            })
 
             print(f"[Error] sample index={idx}, reason={e}")
             print(
@@ -513,20 +570,28 @@ def evaluate_dataset(
             skipped += 1
             total += 1
             subject_stats[sample.subject]["total"] += 1
+
+            skipped_samples.append({
+                "index": idx,
+                "subject": sample.subject,
+                "question": sample.question,
+                "options": sample.options,
+                "gold_index": sample.answer,
+                "gold_label": None if sample.answer is None else option_label(sample.answer),
+                "error": str(e),
+                "num_calls": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0
+            })
+
             print(f"[Error] sample index={idx}, reason={e}")
 
-    # -------------------------------
-    # subject별 accuracy 계산
-    # -------------------------------
     subject_accuracy = {}
     print("\n===== Subject-wise Accuracy =====")
 
     for subject, stats in subject_stats.items():
-        if stats["total"] > 0:
-            acc = stats["correct"] / stats["total"]
-        else:
-            acc = None
-
+        acc = stats["correct"] / stats["total"] if stats["total"] > 0 else None
         subject_accuracy[subject] = {
             "accuracy": acc,
             "total": stats["total"],
@@ -540,11 +605,12 @@ def evaluate_dataset(
 
     accuracy = correct / total if total > 0 else None
     num_processed = len(results)
+    num_attempted = total
 
-    avg_input_tokens = dataset_total_input_tokens / num_processed if num_processed > 0 else None
-    avg_output_tokens = dataset_total_output_tokens / num_processed if num_processed > 0 else None
-    avg_total_tokens = dataset_total_tokens / num_processed if num_processed > 0 else None
-    avg_num_calls = dataset_total_calls / num_processed if num_processed > 0 else None
+    avg_input_tokens = dataset_total_input_tokens / num_attempted if num_attempted > 0 else None
+    avg_output_tokens = dataset_total_output_tokens / num_attempted if num_attempted > 0 else None
+    avg_total_tokens = dataset_total_tokens / num_attempted if num_attempted > 0 else None
+    avg_num_calls = dataset_total_calls / num_attempted if num_attempted > 0 else None
 
     print("accuracy:", accuracy)
     print("dataset_total_input_tokens:", dataset_total_input_tokens)
@@ -562,6 +628,7 @@ def evaluate_dataset(
         "num_correct": correct,
         "num_skipped": skipped,
         "num_processed": num_processed,
+        "num_attempted": num_attempted,
         "dataset_total_input_tokens": dataset_total_input_tokens,
         "dataset_total_output_tokens": dataset_total_output_tokens,
         "dataset_total_tokens": dataset_total_tokens,
@@ -571,7 +638,8 @@ def evaluate_dataset(
         "avg_total_tokens": avg_total_tokens,
         "avg_num_calls": avg_num_calls,
         "subject_accuracy": subject_accuracy,
-        "results": results
+        "results": results,
+        "skipped_samples": skipped_samples
     }
 
     if save_path is not None:
@@ -581,12 +649,13 @@ def evaluate_dataset(
     return output
 
 
-# -------------------------------
-# 12. 실행 예시
-# -------------------------------
+# =========================================================
+# 13. 실행
+# =========================================================
 def main():
     random.seed(42)
     torch.manual_seed(42)
+
     tokenizer, model = load_model(MODEL_NAME)
 
     dataset = load_all_subjects_random(
@@ -601,16 +670,19 @@ def main():
         model=model,
         tokenizer=tokenizer,
         dataset=dataset,
+        temperature=DEFAULT_TEMPERATURE,
+        top_p=DEFAULT_TOP_P,
         verbose=True,
-        save_path="EBR_final.json"
+        save_path="EBR_final_no_self_consistency.json"
     )
 
     print("\n===== FINAL RESULT =====")
     print("Accuracy:", result["accuracy"])
     print("Num evaluated:", result["num_evaluated"])
     print("Num correct:", result["num_correct"])
-    print("Num skipped:", result["num_skipped"])
+    print("Num skipped:", len(result["skipped_samples"]))
     print("Num processed:", result["num_processed"])
+    print("Num attempted:", result["num_attempted"])
     print("Dataset total input tokens:", result["dataset_total_input_tokens"])
     print("Dataset total output tokens:", result["dataset_total_output_tokens"])
     print("Dataset total tokens:", result["dataset_total_tokens"])
