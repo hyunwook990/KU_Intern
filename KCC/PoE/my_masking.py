@@ -258,7 +258,6 @@ class HFLLM:
 # Parsing Utils
 # =========================================================
 
-
 def extract_json_block(text: str) -> str:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
@@ -301,6 +300,30 @@ def label_to_index(label: str) -> int:
     if label not in labels:
         raise ValueError(f"Invalid label: {label}")
     return labels.index(label)
+
+
+def normalize_final_answer(raw_answer, remaining_labels: List[str]) -> str:
+    s = str(raw_answer).strip().upper()
+
+    # 문자/숫자만 남김
+    s = re.sub(r"[^A-Z0-9]", "", s)
+
+    # 숫자면 1 -> A, 2 -> B ...
+    if s.isdigit():
+        idx = int(s) - 1
+        if 0 <= idx < len(remaining_labels):
+            return remaining_labels[idx]
+        raise ValueError(
+            f"Invalid numeric answer: raw={raw_answer}, normalized={s}, valid={remaining_labels}"
+        )
+
+    # 문자면 그대로 비교
+    if s in remaining_labels:
+        return s
+
+    raise ValueError(
+        f"Invalid final answer: raw={raw_answer}, normalized={s}, valid={remaining_labels}"
+    )
 
 
 def parse_module_a_option_output(
@@ -353,7 +376,6 @@ def format_candidate_block(labels: List[str], options: List[str]) -> str:
 # =========================================================
 # 데이터셋 로드
 # =========================================================
-
 
 def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> QuestionSample:
     options = []
@@ -565,12 +587,14 @@ class FirstElimination:
             else:
                 elimination_mask.append(0)
                 remaining_indices.append(idx)
+
         # 안전장치: 다 제거되면 top1 하나는 살림
         if len(remaining_indices) == 0:
             top_idx = max(range(len(confidences)), key=lambda i: confidences[i])
             elimination_mask = [1] * len(confidences)
             elimination_mask[top_idx] = 0
             remaining_indices = [top_idx]
+
         print(f"remaining_options: {remaining_indices}")
 
         return FirstEliminationResult(
@@ -645,14 +669,9 @@ class FinalDecision:
 
         try:
             data = safe_json_loads(gen_result.text)
-            final_answer_label = str(data["answer"]).strip().upper()
+            final_answer_label = normalize_final_answer(data["answer"], remaining_labels)
             final_explanation = str(data["explanation"]).strip()
             model_confidence = clamp_confidence(float(data["confidence"]))
-
-            if final_answer_label not in remaining_labels:
-                raise ValueError(
-                    f"Invalid final answer: {final_answer_label}, valid={remaining_labels}"
-                )
 
             chosen_idx = remaining_labels.index(final_answer_label)
             base_confidence = remaining_confidences[chosen_idx]
@@ -889,9 +908,6 @@ class EliminationPipeline:
 
             # -------------------------------------------------
             # 3) 추가 제거 없음
-            #    - 1개 남아도 그대로 final decision
-            #    - 2개 남아도 제거된 보기 reasoning 포함해서 final decision
-            #    - 3개 이상 남아도 전부 넣고 final decision
             # -------------------------------------------------
             final_result = self.final_decision.run(
                 question=sample.question,
@@ -962,7 +978,6 @@ class EliminationPipeline:
 # =========================================================
 # Evaluation
 # =========================================================
-
 
 def init_dataset_module_usage() -> Dict:
     return {
