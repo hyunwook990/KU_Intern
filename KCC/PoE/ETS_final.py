@@ -1586,7 +1586,7 @@ if __name__ == "__main__":
     llm = HFLLM(
         model_name=MODEL_NAME,
         device_map="auto",
-        max_new_tokens=300
+        max_new_tokens=512
     )
 
     pipeline = EliminationPipeline(

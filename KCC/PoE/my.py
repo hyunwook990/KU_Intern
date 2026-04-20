@@ -71,25 +71,7 @@ class FirstEliminationResult:
 
 
 @dataclass
-class AdditionalEliminationResult:
-    elimination_mask: List[int]         # local mask on current remaining set
-    remaining_indices: List[int]
-
-
-@dataclass
-class CompareTwoResult:
-    winner_local_index: int
-    reason: str
-    confidence: float
-    raw_output: str
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int
-    num_calls: int = 1
-
-
-@dataclass
-class DirectAnswerResult:
+class FinalDecisionResult:
     final_answer_label: str
     final_explanation: str
     calibrated_confidence: float
@@ -143,7 +125,7 @@ MODULE_A_PROMPT = """당신은 객관식 문제의 하나의 선택지만 평가
 
 작업:
 1. 이 선택지가 정답일 가능성을 평가하세요.
-2. 1~3문장으로 rationale을 작성하세요.
+2. 1~2문장으로 rationale을 작성하세요.
 3. 이 선택지가 틀릴 수 있는 이유 또는 한계를 반드시 포함하세요.
 
 반드시 아래 JSON 형식으로만 답하세요:
@@ -159,65 +141,39 @@ MODULE_A_PROMPT = """당신은 객관식 문제의 하나의 선택지만 평가
 """
 
 
-COMPARE_TWO_PROMPT = """당신은 남은 두 개의 객관식 선택지를 직접 비교하는 전문가입니다.
+FINAL_DECISION_PROMPT = """당신은 객관식 문제의 최종 답안을 결정하는 전문가입니다.
 
 문제:
 {question}
 
-선택지 1:
-{opt1_label}. {opt1_text}
+현재 살아남은 후보 선택지들:
+{remaining_candidates_text}
 
-선택지 2:
-{opt2_label}. {opt2_text}
+후보 선택지별 rationale:
+{remaining_rationales_text}
 
-기존 rationale:
-- {opt1_label}: {reason1}
-- {opt2_label}: {reason2}
+이미 제거된 선택지들:
+{eliminated_candidates_text}
 
-기존 confidence:
-- {opt1_label}: {conf1}
-- {opt2_label}: {conf2}
+제거된 선택지들의 rationale:
+{eliminated_rationales_text}
 
 작업:
-1. 두 선택지를 직접 비교하세요.
-2. 둘 중 어떤 선택지가 정답일 가능성이 더 높은지 고르세요.
-3. 왜 다른 선택지가 밀리는지 분명히 설명하세요.
+1. 살아남은 후보들 중 최종 정답 하나를 고르세요.
+2. 제거된 선택지들이 왜 탈락했는지도 참고해서 최종 판단하세요.
+3. 특히 후보가 2개라면, 두 후보만 보지 말고 제거된 선택지들의 reasoning도 함께 보고 상대적으로 더 타당한 답을 고르세요.
 
 반드시 아래 JSON 형식으로만 답하세요:
 {{
-  "winner": "{opt1_label}" 또는 "{opt2_label}",
-  "reason": "설명",
+  "answer": "후보 중 하나의 라벨",
+  "explanation": "2~4문장 설명",
   "confidence": 0.0
 }}
 
 규칙:
-- confidence는 두 선택지를 비교한 최종 판단에 대한 확신도입니다.
+- answer는 반드시 현재 살아남은 후보 라벨 중 하나여야 합니다.
+- confidence는 최종 답안에 대한 확신도입니다.
 - JSON 이외의 텍스트는 출력하지 마세요.
-"""
-
-
-DIRECT_ANSWER_PROMPT = """당신은 객관식 문제의 최종 답안을 정리하는 전문가입니다.
-
-문제:
-{question}
-
-최종 선택:
-{chosen_label}. {chosen_text}
-
-선택된 rationale:
-{chosen_rationale}
-
-제거된 선택지들:
-{eliminated_rationales_text}
-
-작업:
-1. 왜 이 선택지가 최종 답으로 적절한지 1~2문장으로 설명하세요.
-2. 제거된 선택지들이 왜 제외되었는지도 간단히 요약하세요.
-3. 전체는 2~4문장으로 작성하세요.
-
-규칙:
-- 새로운 복잡한 추론을 추가하지 말고 앞 단계 판단을 정리하세요.
-- 일반 텍스트로만 답하세요.
 """
 
 
@@ -299,6 +255,7 @@ class HFLLM:
 # =========================================================
 # Parsing Utils
 # =========================================================
+
 
 def extract_json_block(text: str) -> str:
     match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -385,9 +342,16 @@ def format_reason_block(
     return "\n".join(lines)
 
 
+def format_candidate_block(labels: List[str], options: List[str]) -> str:
+    if len(labels) == 0:
+        return "없음"
+    return "\n".join([f"- {label}. {opt}" for label, opt in zip(labels, options)])
+
+
 # =========================================================
 # 데이터셋 로드
 # =========================================================
+
 
 def convert_item_to_sample(item: dict, subject: Optional[str] = None) -> QuestionSample:
     options = []
@@ -616,110 +580,10 @@ class FirstElimination:
 
 
 # =========================================================
-# Additional Elimination: 3개 이상 남았을 때 추가 제거
+# Final Decision
 # =========================================================
 
-class AdditionalElimination:
-    def __init__(self):
-        pass
-
-    def run(
-        self,
-        question: str,
-        remaining_labels: List[str],
-        remaining_options: List[str],
-        remaining_rationales: List[str],
-        remaining_confidences: List[float]
-    ) -> AdditionalEliminationResult:
-        """
-        3개 이상 남았을 때 추가 제거 로직을 넣는 자리.
-        아직 전략이 정해지지 않았으므로 함수 틀만 만들어 둠.
-        """
-        print("==============================Additional_Elimination==============================")
-
-        # TODO: 여기서 추가 제거 전략 구현
-        # 예:
-        # 1) confidence 최하위 제거
-        # 2) top2 제외 나머지 제거
-        # 3) pairwise 비교 후 하나 제거
-        # 4) LLM으로 weakest option 선택
-
-        pass
-
-
-# =========================================================
-# Compare Two
-# =========================================================
-
-def run_compare_two(
-    llm: HFLLM,
-    question: str,
-    options: List[str],
-    labels: List[str],
-    rationales: List[str],
-    confidences: List[float],
-    temperature: float = 0.0
-) -> CompareTwoResult:
-    print("==============================Compare_Two==============================")
-
-    if len(options) != 2:
-        raise ValueError("CompareTwo는 선택지가 정확히 2개일 때만 실행됩니다.")
-
-    prompt = COMPARE_TWO_PROMPT.format(
-        question=question,
-        opt1_label=labels[0],
-        opt1_text=options[0],
-        opt2_label=labels[1],
-        opt2_text=options[1],
-        reason1=rationales[0],
-        reason2=rationales[1],
-        conf1=confidences[0],
-        conf2=confidences[1]
-    )
-
-    gen_result = llm.generate(prompt, temperature=temperature)
-
-    try:
-        data = safe_json_loads(gen_result.text)
-
-        winner_label = str(data["winner"]).strip().upper()
-        reason = str(data["reason"]).strip()
-        confidence = clamp_confidence(float(data["confidence"]))
-
-        if winner_label not in labels:
-            raise ValueError(f"Invalid winner: {winner_label}, valid={labels}")
-
-        winner_local_index = labels.index(winner_label)
-
-    except Exception as e:
-        raise ModuleExecutionError(
-            module_name="compare_two",
-            usage={
-                "num_calls": 1,
-                "input_tokens": gen_result.input_tokens,
-                "output_tokens": gen_result.output_tokens,
-                "total_tokens": gen_result.total_tokens
-            },
-            message=f"CompareTwo parse failed: {e}",
-            raw_output=gen_result.text
-        ) from e
-
-    return CompareTwoResult(
-        winner_local_index=winner_local_index,
-        reason=reason,
-        confidence=confidence,
-        raw_output=gen_result.text,
-        input_tokens=gen_result.input_tokens,
-        output_tokens=gen_result.output_tokens,
-        total_tokens=gen_result.total_tokens
-    )
-
-
-# =========================================================
-# Direct Answer
-# =========================================================
-
-class DirectAnswer:
+class FinalDecision:
     def __init__(
         self,
         llm: HFLLM,
@@ -731,20 +595,35 @@ class DirectAnswer:
     def run(
         self,
         question: str,
-        chosen_label: str,
-        chosen_text: str,
-        chosen_rationale: str,
-        chosen_confidence: float,
+        remaining_labels: List[str],
+        remaining_texts: List[str],
+        remaining_rationales: List[str],
+        remaining_confidences: List[float],
         eliminated_records: List[EliminatedOptionRecord],
         temperature: float = 0.0
-    ) -> DirectAnswerResult:
-        print("==============================Direct_Answer==============================")
+    ) -> FinalDecisionResult:
+        print("==============================Final_Decision==============================")
+
+        remaining_candidates_text = format_candidate_block(
+            labels=remaining_labels,
+            options=remaining_texts
+        )
+        remaining_rationales_text = format_reason_block(
+            labels=remaining_labels,
+            options=remaining_texts,
+            rationales=remaining_rationales,
+            confidences=remaining_confidences
+        )
 
         eliminated_labels = [r.label for r in eliminated_records]
         eliminated_options = [r.option_text for r in eliminated_records]
         eliminated_rationales = [r.rationale for r in eliminated_records]
         eliminated_confidences = [r.confidence for r in eliminated_records]
 
+        eliminated_candidates_text = format_candidate_block(
+            labels=eliminated_labels,
+            options=eliminated_options
+        )
         eliminated_rationales_text = format_reason_block(
             labels=eliminated_labels,
             options=eliminated_options,
@@ -752,34 +631,48 @@ class DirectAnswer:
             confidences=eliminated_confidences
         )
 
-        prompt = DIRECT_ANSWER_PROMPT.format(
+        prompt = FINAL_DECISION_PROMPT.format(
             question=question,
-            chosen_label=chosen_label,
-            chosen_text=chosen_text,
-            chosen_rationale=chosen_rationale,
+            remaining_candidates_text=remaining_candidates_text,
+            remaining_rationales_text=remaining_rationales_text,
+            eliminated_candidates_text=eliminated_candidates_text,
             eliminated_rationales_text=eliminated_rationales_text
         )
 
         gen_result = self.llm.generate(prompt, temperature=temperature)
 
         try:
-            final_explanation = gen_result.text.strip()
-            calibrated_confidence = clamp_confidence(self.calibration_fn(chosen_confidence))
+            data = safe_json_loads(gen_result.text)
+            final_answer_label = str(data["answer"]).strip().upper()
+            final_explanation = str(data["explanation"]).strip()
+            model_confidence = clamp_confidence(float(data["confidence"]))
+
+            if final_answer_label not in remaining_labels:
+                raise ValueError(
+                    f"Invalid final answer: {final_answer_label}, valid={remaining_labels}"
+                )
+
+            chosen_idx = remaining_labels.index(final_answer_label)
+            base_confidence = remaining_confidences[chosen_idx]
+            calibrated_confidence = clamp_confidence(
+                self.calibration_fn(max(base_confidence, model_confidence))
+            )
+
         except Exception as e:
             raise ModuleExecutionError(
-                module_name="direct_answer",
+                module_name="final_decision",
                 usage={
                     "num_calls": 1,
                     "input_tokens": gen_result.input_tokens,
                     "output_tokens": gen_result.output_tokens,
                     "total_tokens": gen_result.total_tokens
                 },
-                message=f"DirectAnswer failed after generation: {e}",
+                message=f"FinalDecision parse failed: {e}",
                 raw_output=gen_result.text
             ) from e
 
-        return DirectAnswerResult(
-            final_answer_label=chosen_label,
+        return FinalDecisionResult(
+            final_answer_label=final_answer_label,
             final_explanation=final_explanation,
             calibrated_confidence=calibrated_confidence,
             raw_output=gen_result.text,
@@ -810,8 +703,7 @@ class EliminationPipeline:
             mode=first_elimination_mode,
             top1_ratio=top1_ratio
         )
-        self.additional_elimination = AdditionalElimination()
-        self.direct_answer = DirectAnswer(llm=llm, calibration_fn=calibration_fn)
+        self.final_decision = FinalDecision(llm=llm, calibration_fn=calibration_fn)
 
     def _subset_by_indices(self, values: List, indices: List[int]) -> List:
         return [values[i] for i in indices]
@@ -859,13 +751,7 @@ class EliminationPipeline:
                     "output_tokens": 0,
                     "total_tokens": 0
                 },
-                "compare_two": {
-                    "num_calls": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0
-                },
-                "direct_answer": {
+                "final_decision": {
                     "num_calls": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -982,121 +868,75 @@ class EliminationPipeline:
                     "criterion_name": first_result.criterion_name,
                     "criterion_value": first_result.criterion_value,
                     "elimination_mask": first_result.elimination_mask,
-                    "remaining_labels": remaining_labels
+                    "remaining_labels": remaining_labels,
+                    "remaining_options": remaining_options,
+                    "remaining_rationales": remaining_rationales,
+                    "remaining_confidences": remaining_confidences,
+                    "eliminated_records": [
+                        {
+                            "label": r.label,
+                            "option_text": r.option_text,
+                            "rationale": r.rationale,
+                            "confidence": r.confidence,
+                            "eliminated_stage": r.eliminated_stage
+                        }
+                        for r in first_eliminated
+                    ]
                 }
             })
 
             # -------------------------------------------------
-            # 3) 3개 이상 남으면 추가 제거 (현재는 pass)
+            # 3) 추가 제거 없음
+            #    - 1개 남아도 그대로 final decision
+            #    - 2개 남아도 제거된 보기 reasoning 포함해서 final decision
+            #    - 3개 이상 남아도 전부 넣고 final decision
             # -------------------------------------------------
-            if len(remaining_options) >= 3:
-                additional_result = self.additional_elimination.run(
-                    question=sample.question,
-                    remaining_labels=remaining_labels,
-                    remaining_options=remaining_options,
-                    remaining_rationales=remaining_rationales,
-                    remaining_confidences=remaining_confidences
-                )
-
-                # 아직 pass 상태이므로 실제 사용 전엔 여기에 오면 안 됨
-                raise NotImplementedError(
-                    "AdditionalElimination.run()이 아직 구현되지 않았습니다. "
-                    "3개 이상 남는 경우의 추가 제거 전략을 구현하세요."
-                )
-
-            # -------------------------------------------------
-            # 4) 2개 남으면 compare two
-            # -------------------------------------------------
-            if len(remaining_options) == 2:
-                compare_result = run_compare_two(
-                    llm=self.llm,
-                    question=sample.question,
-                    options=remaining_options,
-                    labels=remaining_labels,
-                    rationales=remaining_rationales,
-                    confidences=remaining_confidences,
-                    temperature=temperature
-                )
-
-                self._add_module_usage(
-                    usage=sample_usage,
-                    module_name="compare_two",
-                    num_calls=compare_result.num_calls,
-                    input_tokens=compare_result.input_tokens,
-                    output_tokens=compare_result.output_tokens,
-                    total_tokens=compare_result.total_tokens
-                )
-
-                winner_local_idx = compare_result.winner_local_index
-                loser_local_idx = 1 - winner_local_idx
-
-                loser_record = EliminatedOptionRecord(
-                    global_index=remaining_global_indices[loser_local_idx],
-                    label=remaining_labels[loser_local_idx],
-                    option_text=remaining_options[loser_local_idx],
-                    rationale=remaining_rationales[loser_local_idx],
-                    confidence=remaining_confidences[loser_local_idx],
-                    eliminated_stage="compare_two_loser"
-                )
-                eliminated_records.append(loser_record)
-
-                chosen_label = remaining_labels[winner_local_idx]
-                chosen_text = remaining_options[winner_local_idx]
-                chosen_rationale = compare_result.reason
-                chosen_confidence = max(
-                    remaining_confidences[winner_local_idx],
-                    compare_result.confidence
-                )
-
-                trace[-1]["compare_two"] = {
-                    "candidate_labels": remaining_labels,
-                    "candidate_options": remaining_options,
-                    "candidate_rationales": remaining_rationales,
-                    "candidate_confidences": remaining_confidences,
-                    "winner_label": chosen_label,
-                    "winner_reason": compare_result.reason,
-                    "winner_confidence": compare_result.confidence,
-                    "raw_output": compare_result.raw_output
-                }
-
-            # -------------------------------------------------
-            # 5) 1개 남으면 direct answer
-            # -------------------------------------------------
-            elif len(remaining_options) == 1:
-                chosen_label = remaining_labels[0]
-                chosen_text = remaining_options[0]
-                chosen_rationale = remaining_rationales[0]
-                chosen_confidence = remaining_confidences[0]
-
-            else:
-                raise ValueError("남은 선택지 수가 0개입니다. 로직을 확인하세요.")
-
-            d_result = self.direct_answer.run(
+            final_result = self.final_decision.run(
                 question=sample.question,
-                chosen_label=chosen_label,
-                chosen_text=chosen_text,
-                chosen_rationale=chosen_rationale,
-                chosen_confidence=chosen_confidence,
+                remaining_labels=remaining_labels,
+                remaining_texts=remaining_options,
+                remaining_rationales=remaining_rationales,
+                remaining_confidences=remaining_confidences,
                 eliminated_records=eliminated_records,
                 temperature=temperature
             )
 
             self._add_module_usage(
                 usage=sample_usage,
-                module_name="direct_answer",
-                num_calls=d_result.num_calls,
-                input_tokens=d_result.input_tokens,
-                output_tokens=d_result.output_tokens,
-                total_tokens=d_result.total_tokens
+                module_name="final_decision",
+                num_calls=final_result.num_calls,
+                input_tokens=final_result.input_tokens,
+                output_tokens=final_result.output_tokens,
+                total_tokens=final_result.total_tokens
             )
+
+            trace[-1]["final_decision"] = {
+                "candidate_labels": remaining_labels,
+                "candidate_options": remaining_options,
+                "candidate_rationales": remaining_rationales,
+                "candidate_confidences": remaining_confidences,
+                "eliminated_records": [
+                    {
+                        "label": r.label,
+                        "option_text": r.option_text,
+                        "rationale": r.rationale,
+                        "confidence": r.confidence,
+                        "eliminated_stage": r.eliminated_stage
+                    }
+                    for r in eliminated_records
+                ],
+                "final_answer_label": final_result.final_answer_label,
+                "final_explanation": final_result.final_explanation,
+                "model_raw_output": final_result.raw_output
+            }
 
             return {
                 "trace": trace,
                 "final": {
-                    "answer_label": d_result.final_answer_label,
-                    "answer_text": sample.options[label_to_index(d_result.final_answer_label)],
-                    "final_explanation": d_result.final_explanation,
-                    "confidence": d_result.calibrated_confidence
+                    "answer_label": final_result.final_answer_label,
+                    "answer_text": sample.options[label_to_index(final_result.final_answer_label)],
+                    "final_explanation": final_result.final_explanation,
+                    "confidence": final_result.calibrated_confidence
                 },
                 "usage": sample_usage
             }
@@ -1121,6 +961,7 @@ class EliminationPipeline:
 # Evaluation
 # =========================================================
 
+
 def init_dataset_module_usage() -> Dict:
     return {
         "module_a": {
@@ -1129,13 +970,7 @@ def init_dataset_module_usage() -> Dict:
             "output_tokens": 0,
             "total_tokens": 0
         },
-        "compare_two": {
-            "num_calls": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0
-        },
-        "direct_answer": {
+        "final_decision": {
             "num_calls": 0,
             "input_tokens": 0,
             "output_tokens": 0,
@@ -1145,7 +980,7 @@ def init_dataset_module_usage() -> Dict:
 
 
 def update_dataset_module_usage(dataset_module_usage: Dict, sample_module_usage: Dict) -> None:
-    for module_name in ["module_a", "compare_two", "direct_answer"]:
+    for module_name in ["module_a", "final_decision"]:
         dataset_module_usage[module_name]["num_calls"] += sample_module_usage[module_name]["num_calls"]
         dataset_module_usage[module_name]["input_tokens"] += sample_module_usage[module_name]["input_tokens"]
         dataset_module_usage[module_name]["output_tokens"] += sample_module_usage[module_name]["output_tokens"]
@@ -1161,13 +996,7 @@ def compute_avg_module_usage(dataset_module_usage: Dict, denominator: int) -> Di
                 "avg_output_tokens": None,
                 "avg_total_tokens": None
             },
-            "compare_two": {
-                "avg_num_calls": None,
-                "avg_input_tokens": None,
-                "avg_output_tokens": None,
-                "avg_total_tokens": None
-            },
-            "direct_answer": {
+            "final_decision": {
                 "avg_num_calls": None,
                 "avg_input_tokens": None,
                 "avg_output_tokens": None,
@@ -1176,7 +1005,7 @@ def compute_avg_module_usage(dataset_module_usage: Dict, denominator: int) -> Di
         }
 
     avg_usage = {}
-    for module_name in ["module_a", "compare_two", "direct_answer"]:
+    for module_name in ["module_a", "final_decision"]:
         avg_usage[module_name] = {
             "avg_num_calls": dataset_module_usage[module_name]["num_calls"] / denominator,
             "avg_input_tokens": dataset_module_usage[module_name]["input_tokens"] / denominator,
@@ -1263,8 +1092,7 @@ def evaluate_dataset(
                 print("total_output_tokens:", usage["total_output_tokens"])
                 print("total_tokens:", usage["total_tokens"])
                 print("module_a_total_tokens:", usage["by_module"]["module_a"]["total_tokens"])
-                print("compare_two_total_tokens:", usage["by_module"]["compare_two"]["total_tokens"])
-                print("direct_answer_total_tokens:", usage["by_module"]["direct_answer"]["total_tokens"])
+                print("final_decision_total_tokens:", usage["by_module"]["final_decision"]["total_tokens"])
                 print("#############################################################")
                 print(f"[{idx + 1}/{len(dataset)}] current accuracy = {acc_so_far:.4f}, skipped = {skipped}")
 
@@ -1429,12 +1257,10 @@ if __name__ == "__main__":
 
     print("\n===== Dataset Module Usage =====")
     print("Module A:", result["dataset_module_usage"]["module_a"])
-    print("Compare Two:", result["dataset_module_usage"]["compare_two"])
-    print("Direct Answer:", result["dataset_module_usage"]["direct_answer"])
+    print("Final Decision:", result["dataset_module_usage"]["final_decision"])
 
     print("\n===== Avg Module Usage =====")
     print("Module A:", result["avg_module_usage"]["module_a"])
-    print("Compare Two:", result["avg_module_usage"]["compare_two"])
-    print("Direct Answer:", result["avg_module_usage"]["direct_answer"])
+    print("Final Decision:", result["avg_module_usage"]["final_decision"])
 
     save_results_json(result, "ETS_revised_pipeline.json")

@@ -35,7 +35,7 @@ MODEL_NAME = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("DEVICE:", DEVICE)
 
-DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TOP_P = 0.95
 
 
@@ -177,26 +177,47 @@ def build_ebr_prompt(
 ) -> str:
     option_text = format_options(active_indices, options)
 
+#     prompt = f"""
+# You are solving a multiple-choice question using elimination-based reasoning.
+# Please answer in Korean.
+
+# Let’s think step by step. We will eliminate incorrect answers one by one.
+
+# Instructions:
+# 1. Read the question carefully.
+# 2. Consider only the currently remaining options.
+# 3. Briefly compare the remaining options.
+# 4. Explain why some options are less plausible.
+# 5. Eliminate exactly ONE option in this step.
+# 6. Do not give the final answer yet unless only one option remains.
+# 7. The last line of your response must be exactly:
+# Eliminated: <OPTION_LABEL>
+
+# Question:
+# {question}
+
+# Current remaining options:
+# {option_text}
+# """.strip()
     prompt = f"""
-You are solving a multiple-choice question using elimination-based reasoning.
-Please answer in Korean.
+당신은 제거 기반 추론(elimination-based reasoning)을 통해 객관식 문제를 해결하는 전문가입니다.
 
-Let’s think step by step. We will eliminate incorrect answers one by one.
+단계적으로 사고하며(step-by-step) 오답을 하나씩 제거하세요.
 
-Instructions:
-1. Read the question carefully.
-2. Consider only the currently remaining options.
-3. Briefly compare the remaining options.
-4. Explain why some options are less plausible.
-5. Eliminate exactly ONE option in this step.
-6. Do not give the final answer yet unless only one option remains.
-7. The last line of your response must be exactly:
-Eliminated: <OPTION_LABEL>
+지침:
+1. 문제를 주의 깊게 읽으세요.
+2. 현재 남아 있는 선택지들만 고려하세요.
+3. 남아 있는 선택지들을 간단히 비교하세요.
+4. 왜 일부 선택지가 덜 타당한지 설명하세요.
+5. 이 단계에서는 반드시 선택지 하나만 제거하세요.
+6. 선택지가 하나만 남은 경우가 아니라면 최종 정답은 말하지 마세요.
+7. 응답의 마지막 줄은 반드시 아래 형식을 정확히 따르세요:
+Eliminated: <선택지 라벨>
 
-Question:
+문제:
 {question}
 
-Current remaining options:
+현재 남아 있는 선택지:
 {option_text}
 """.strip()
 
@@ -388,6 +409,7 @@ def solve_by_ebr(
                 top_p=top_p,
                 verbose=verbose
             )
+            print(reasoning)
 
             history.append({
                 "step": step,
@@ -604,7 +626,6 @@ def evaluate_dataset(
             print(f"{subject}: accuracy={acc:.4f}, ({stats['correct']}/{stats['total']})")
 
     accuracy = correct / total if total > 0 else None
-    num_processed = len(results)
     num_attempted = total
 
     avg_input_tokens = dataset_total_input_tokens / num_attempted if num_attempted > 0 else None
@@ -627,8 +648,6 @@ def evaluate_dataset(
         "num_evaluated": total,
         "num_correct": correct,
         "num_skipped": skipped,
-        "num_processed": num_processed,
-        "num_attempted": num_attempted,
         "dataset_total_input_tokens": dataset_total_input_tokens,
         "dataset_total_output_tokens": dataset_total_output_tokens,
         "dataset_total_tokens": dataset_total_tokens,
@@ -673,7 +692,7 @@ def main():
         temperature=DEFAULT_TEMPERATURE,
         top_p=DEFAULT_TOP_P,
         verbose=True,
-        save_path="EBR_final_no_self_consistency.json"
+        save_path="EBR_final_temp0json"
     )
 
     print("\n===== FINAL RESULT =====")
@@ -681,8 +700,6 @@ def main():
     print("Num evaluated:", result["num_evaluated"])
     print("Num correct:", result["num_correct"])
     print("Num skipped:", len(result["skipped_samples"]))
-    print("Num processed:", result["num_processed"])
-    print("Num attempted:", result["num_attempted"])
     print("Dataset total input tokens:", result["dataset_total_input_tokens"])
     print("Dataset total output tokens:", result["dataset_total_output_tokens"])
     print("Dataset total tokens:", result["dataset_total_tokens"])
