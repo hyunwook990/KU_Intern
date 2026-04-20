@@ -1,4 +1,4 @@
-# 마지막에 reasoning을 다시 하지않고 첫 rationale 사용
+# 마지막에 reasoning을 다시 하지않고 첫 rationale 사용 
 import json
 import re
 from dataclasses import dataclass
