@@ -19,13 +19,15 @@ class EvaluationError(Exception):
         input_tokens: int = 0,
         output_tokens: int = 0,
         total_tokens: int = 0,
-        num_calls: int = 0
+        num_calls: int = 0,
+        raw_output: Optional[str] = None
     ):
         super().__init__(message)
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.total_tokens = total_tokens
         self.num_calls = num_calls
+        self.raw_output = raw_output
 
 
 # =========================================================
@@ -167,6 +169,22 @@ def format_options(option_indices: List[int], all_options: List[str]) -> str:
     return "\n".join(lines)
 
 
+def normalize_text(text: str) -> str:
+    text = str(text).strip()
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip(" \n\t\r\"'`“”‘’.,:;!?()[]{}<>")
+    return text
+
+
+def get_valid_labels(active_indices: List[int]) -> List[str]:
+    return [option_label(i) for i in active_indices]
+
+
+def extract_last_nonempty_line(text: str) -> str:
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
 # =========================================================
 # 6. 프롬프트
 # =========================================================
@@ -177,28 +195,6 @@ def build_ebr_prompt(
 ) -> str:
     option_text = format_options(active_indices, options)
 
-#     prompt = f"""
-# You are solving a multiple-choice question using elimination-based reasoning.
-# Please answer in Korean.
-
-# Let’s think step by step. We will eliminate incorrect answers one by one.
-
-# Instructions:
-# 1. Read the question carefully.
-# 2. Consider only the currently remaining options.
-# 3. Briefly compare the remaining options.
-# 4. Explain why some options are less plausible.
-# 5. Eliminate exactly ONE option in this step.
-# 6. Do not give the final answer yet unless only one option remains.
-# 7. The last line of your response must be exactly:
-# Eliminated: <OPTION_LABEL>
-
-# Question:
-# {question}
-
-# Current remaining options:
-# {option_text}
-# """.strip()
     prompt = f"""
 당신은 제거 기반 추론(elimination-based reasoning)을 통해 객관식 문제를 해결하는 전문가입니다.
 
@@ -208,11 +204,17 @@ def build_ebr_prompt(
 1. 문제를 주의 깊게 읽으세요.
 2. 현재 남아 있는 선택지들만 고려하세요.
 3. 남아 있는 선택지들을 간단히 비교하세요.
-4. 왜 일부 선택지가 덜 타당한지 설명하세요.
+4. 왜 일부 선택지가 덜 타당한지 간단히 설명하세요.
 5. 이 단계에서는 반드시 선택지 하나만 제거하세요.
 6. 선택지가 하나만 남은 경우가 아니라면 최종 정답은 말하지 마세요.
-7. 응답의 마지막 줄은 반드시 아래 형식을 정확히 따르세요:
-Eliminated: <선택지 라벨>
+7. 응답의 마지막 줄은 반드시 아래 형식 중 하나를 정확히 따라야 합니다:
+Eliminated: A
+Eliminated: B
+Eliminated: C
+Eliminated: D
+8. 선택지의 내용 자체(예: 톱교잡)를 마지막 줄에 쓰지 마세요.
+9. 마지막 줄에는 반드시 라벨(A, B, C, D)만 쓰세요.
+10. 현재 남아 있는 선택지 중 하나만 제거해야 합니다.
 
 문제:
 {question}
@@ -222,6 +224,32 @@ Eliminated: <선택지 라벨>
 """.strip()
 
     return prompt
+
+
+def build_repair_prompt(
+    raw_output: str,
+    active_indices: List[int]
+) -> str:
+    valid_labels_text = ", ".join(get_valid_labels(active_indices))
+    return f"""
+아래 출력에서 제거할 선택지 라벨만 복구하세요.
+
+원래 출력:
+{raw_output}
+
+현재 제거 가능한 라벨:
+{valid_labels_text}
+
+반드시 아래 형식으로만 답하세요:
+Eliminated: X
+
+규칙:
+- X는 현재 제거 가능한 라벨 중 하나여야 합니다.
+- 설명 금지
+- JSON 금지
+- 다른 문장 금지
+- 마지막 줄 하나만 출력하세요.
+""".strip()
 
 
 # =========================================================
@@ -273,38 +301,247 @@ def generate_text(
 # =========================================================
 # 8. 제거 선택지 파싱
 # =========================================================
-def parse_elimination_decision(
-    response_text: str,
-    active_indices: List[int]
-) -> Optional[int]:
-    valid_labels = {option_label(idx): idx for idx in active_indices}
+def parse_label_from_text(text: str, valid_labels: Dict[str, int]) -> Optional[int]:
+    if not text:
+        return None
 
     patterns = [
         r"^\s*Eliminated\s*:\s*([A-Z])\s*$",
         r"^\s*Eliminate\s*:\s*([A-Z])\s*$",
+        r"^\s*제거\s*:\s*([A-Z])\s*$",
+        r"^\s*탈락\s*:\s*([A-Z])\s*$",
+        r"^\s*([A-Z])\s*$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            label = match.group(1).upper()
+            if label in valid_labels:
+                return valid_labels[label]
+
+    return None
+
+
+def parse_number_from_text(text: str, active_indices: List[int]) -> Optional[int]:
+    if not text:
+        return None
+
+    number_patterns = [
+        r"^\s*Eliminated\s*:\s*([1-9][0-9]*)\s*$",
+        r"^\s*Eliminate\s*:\s*([1-9][0-9]*)\s*$",
+        r"^\s*제거\s*:\s*([1-9][0-9]*)\s*$",
+        r"^\s*탈락\s*:\s*([1-9][0-9]*)\s*$",
+        r"^\s*([1-9][0-9]*)\s*$",
+    ]
+
+    for pattern in number_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            idx = int(match.group(1)) - 1
+            if idx in active_indices:
+                return idx
+
+    return None
+
+
+def parse_option_text_from_text(
+    text: str,
+    active_indices: List[int],
+    options: List[str],
+    valid_labels: Dict[str, int]
+) -> Optional[int]:
+    if not text:
+        return None
+
+    candidate = normalize_text(text)
+    if not candidate:
+        return None
+
+    label_match = re.match(r"^([A-Z])[\.\)\-:\s].*$", candidate, re.IGNORECASE)
+    if label_match:
+        label = label_match.group(1).upper()
+        if label in valid_labels:
+            return valid_labels[label]
+
+    number_match = re.match(r"^([1-9][0-9]*)[\.\)\-:\s].*$", candidate)
+    if number_match:
+        idx = int(number_match.group(1)) - 1
+        if idx in active_indices:
+            return idx
+
+    exact_matches = []
+    contain_matches = []
+
+    for idx in active_indices:
+        opt_norm = normalize_text(options[idx])
+        if not opt_norm:
+            continue
+        if candidate == opt_norm:
+            exact_matches.append(idx)
+        elif candidate in opt_norm or opt_norm in candidate:
+            contain_matches.append(idx)
+
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(contain_matches) == 1:
+        return contain_matches[0]
+
+    return None
+
+
+def parse_elimination_decision(
+    response_text: str,
+    active_indices: List[int],
+    options: List[str]
+) -> Optional[int]:
+    valid_labels = {option_label(idx): idx for idx in active_indices}
+    normalized_response = normalize_text(response_text)
+    last_line = extract_last_nonempty_line(response_text)
+
+    # -------------------------------------------------
+    # 0) 가장 우선: 마지막 줄만 보고 파싱
+    # -------------------------------------------------
+    idx = parse_label_from_text(last_line, valid_labels)
+    if idx is not None:
+        return idx
+
+    idx = parse_number_from_text(last_line, active_indices)
+    if idx is not None:
+        return idx
+
+    idx = parse_option_text_from_text(last_line, active_indices, options, valid_labels)
+    if idx is not None:
+        return idx
+
+    # -------------------------------------------------
+    # 1) 전체 응답에서 안전한 라벨 파싱
+    # -------------------------------------------------
+    label_patterns = [
+        r"^\s*Eliminated\s*:\s*([A-Z])\s*$",
+        r"^\s*Eliminate\s*:\s*([A-Z])\s*$",
+        r"^\s*제거\s*:\s*([A-Z])\s*$",
+        r"^\s*탈락\s*:\s*([A-Z])\s*$",
         r"Eliminated\s*:\s*([A-Z])",
         r"Eliminate\s*:\s*([A-Z])",
+        r"Elimination\s*:\s*([A-Z])",
         r"Therefore[, ]*eliminate\s+([A-Z])",
         r"So[, ]*eliminate\s+([A-Z])",
         r"([A-Z])\s*를\s*제거",
         r"([A-Z])\s*를\s*탈락",
         r"제거할\s*선택지\s*:\s*([A-Z])",
         r"제거\s*:\s*([A-Z])",
+        r"탈락\s*:\s*([A-Z])",
+        r"없앨\s*선택지\s*:\s*([A-Z])",
     ]
 
-    for pattern in patterns:
+    for pattern in label_patterns:
         match = re.search(pattern, response_text, re.IGNORECASE | re.MULTILINE)
         if match:
             label = match.group(1).upper()
             if label in valid_labels:
                 return valid_labels[label]
 
-    candidates = re.findall(r"\b([A-Z])\b", response_text.upper())
-    for c in reversed(candidates):
+    # -------------------------------------------------
+    # 2) 숫자 파싱
+    # -------------------------------------------------
+    number_patterns = [
+        r"^\s*Eliminated\s*:\s*([1-9][0-9]*)\s*$",
+        r"^\s*Eliminate\s*:\s*([1-9][0-9]*)\s*$",
+        r"Eliminated\s*:\s*([1-9][0-9]*)",
+        r"Eliminate\s*:\s*([1-9][0-9]*)",
+        r"제거\s*:\s*([1-9][0-9]*)",
+        r"탈락\s*:\s*([1-9][0-9]*)",
+        r"제거할\s*선택지\s*:\s*([1-9][0-9]*)",
+        r"선택지\s*([1-9][0-9]*)\s*제거",
+    ]
+
+    for pattern in number_patterns:
+        match = re.search(pattern, response_text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            num = int(match.group(1))
+            idx = num - 1
+            if idx in active_indices:
+                return idx
+
+    # -------------------------------------------------
+    # 3) "Eliminated: <raw option text>" 파싱
+    # -------------------------------------------------
+    text_patterns = [
+        r"^\s*Eliminated\s*:\s*(.+?)\s*$",
+        r"^\s*Eliminate\s*:\s*(.+?)\s*$",
+        r"^\s*Elimination\s*:\s*(.+?)\s*$",
+        r"^\s*제거할\s*선택지\s*:\s*(.+?)\s*$",
+        r"^\s*제거\s*:\s*(.+?)\s*$",
+        r"^\s*탈락\s*:\s*(.+?)\s*$",
+    ]
+
+    for pattern in text_patterns:
+        match = re.search(pattern, response_text, re.IGNORECASE | re.MULTILINE)
+        if not match:
+            continue
+
+        idx = parse_option_text_from_text(
+            match.group(1),
+            active_indices=active_indices,
+            options=options,
+            valid_labels=valid_labels
+        )
+        if idx is not None:
+            return idx
+
+    # -------------------------------------------------
+    # 4) 응답 전체에서 raw option text 직접 매칭
+    #    딱 1개일 때만 허용
+    # -------------------------------------------------
+    option_matches = []
+    for idx in active_indices:
+        opt_norm = normalize_text(options[idx])
+        if len(opt_norm) < 2:
+            continue
+        if opt_norm in normalized_response:
+            option_matches.append(idx)
+
+    if len(option_matches) == 1:
+        return option_matches[0]
+
+    # -------------------------------------------------
+    # 5) 마지막 fallback: 단독 알파벳
+    #    단, 마지막 줄 우선으로 다시 한번
+    # -------------------------------------------------
+    last_line_candidates = re.findall(r"\b([A-Z])\b", last_line.upper())
+    for c in reversed(last_line_candidates):
+        if c in valid_labels:
+            return valid_labels[c]
+
+    all_candidates = re.findall(r"\b([A-Z])\b", response_text.upper())
+    for c in reversed(all_candidates):
         if c in valid_labels:
             return valid_labels[c]
 
     return None
+
+
+def repair_elimination_decision(
+    model,
+    tokenizer,
+    raw_output: str,
+    active_indices: List[int],
+    temperature: float = DEFAULT_TEMPERATURE
+) -> Tuple[str, int, int, int]:
+    prompt = build_repair_prompt(
+        raw_output=raw_output,
+        active_indices=active_indices
+    )
+
+    return generate_text(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_new_tokens=64,
+        temperature=temperature,
+        top_p=0.95
+    )
 
 
 # =========================================================
@@ -319,7 +556,7 @@ def eliminate_one_option(
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     verbose: bool = False
-) -> Tuple[List[int], str, int, int, int, int]:
+) -> Tuple[List[int], str, int, int, int, int, int]:
     prompt = build_ebr_prompt(
         question=question,
         options=options,
@@ -334,15 +571,55 @@ def eliminate_one_option(
         top_p=top_p
     )
 
-    eliminated_idx = parse_elimination_decision(reasoning, current_option_set)
+    eliminated_idx = parse_elimination_decision(
+        response_text=reasoning,
+        active_indices=current_option_set,
+        options=options
+    )
+
+    num_calls = 1
+    final_reasoning = reasoning
+
+    if eliminated_idx is None:
+        repaired_text, r_input, r_output, r_total = repair_elimination_decision(
+            model=model,
+            tokenizer=tokenizer,
+            raw_output=reasoning,
+            active_indices=current_option_set,
+            temperature=0.0
+        )
+
+        input_tokens += r_input
+        output_tokens += r_output
+        total_tokens += r_total
+        num_calls += 1
+
+        eliminated_idx = parse_elimination_decision(
+            response_text=repaired_text,
+            active_indices=current_option_set,
+            options=options
+        )
+
+        final_reasoning = reasoning + "\n\n[REPAIRED]\n" + repaired_text
 
     if eliminated_idx is None:
         raise EvaluationError(
-            f"제거할 선택지를 파싱하지 못했습니다.\n\n출력:\n{reasoning}",
+            f"제거할 선택지를 파싱하지 못했습니다.\n\n출력:\n{final_reasoning}",
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            num_calls=1
+            num_calls=num_calls,
+            raw_output=final_reasoning
+        )
+
+    if eliminated_idx not in current_option_set:
+        raise EvaluationError(
+            f"파싱된 제거 선택지가 현재 active set에 없습니다: {eliminated_idx}\n\n출력:\n{final_reasoning}",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            num_calls=num_calls,
+            raw_output=final_reasoning
         )
 
     next_option_set = [idx for idx in current_option_set if idx != eliminated_idx]
@@ -354,15 +631,17 @@ def eliminate_one_option(
         print(f"Input tokens: {input_tokens}")
         print(f"Output tokens: {output_tokens}")
         print(f"Total tokens: {total_tokens}")
+        print(f"Num calls: {num_calls}")
         print("=" * 60)
 
     return (
         next_option_set,
-        reasoning,
+        final_reasoning,
         eliminated_idx,
         input_tokens,
         output_tokens,
-        total_tokens
+        total_tokens,
+        num_calls
     )
 
 
@@ -398,7 +677,8 @@ def solve_by_ebr(
                 eliminated_idx,
                 input_tokens,
                 output_tokens,
-                step_total_tokens
+                step_total_tokens,
+                step_num_calls
             ) = eliminate_one_option(
                 model=model,
                 tokenizer=tokenizer,
@@ -418,17 +698,19 @@ def solve_by_ebr(
                 "reasoning": reasoning,
                 "eliminated_idx": eliminated_idx,
                 "eliminated_label": option_label(eliminated_idx),
+                "eliminated_text": options[eliminated_idx],
                 "next_option_set": next_option_set.copy(),
                 "next_option_labels": [option_label(i) for i in next_option_set],
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "total_tokens": step_total_tokens
+                "total_tokens": step_total_tokens,
+                "num_calls": step_num_calls
             })
 
             total_input_tokens += input_tokens
             total_output_tokens += output_tokens
             total_tokens += step_total_tokens
-            num_calls += 1
+            num_calls += step_num_calls
 
             current_option_set = next_option_set
             step += 1
@@ -439,7 +721,8 @@ def solve_by_ebr(
                 input_tokens=total_input_tokens + e.input_tokens,
                 output_tokens=total_output_tokens + e.output_tokens,
                 total_tokens=total_tokens + e.total_tokens,
-                num_calls=num_calls + e.num_calls
+                num_calls=num_calls + e.num_calls,
+                raw_output=e.raw_output
             )
 
     final_idx = current_option_set[0]
@@ -575,6 +858,7 @@ def evaluate_dataset(
                 "gold_index": sample.answer,
                 "gold_label": None if sample.answer is None else option_label(sample.answer),
                 "error": str(e),
+                "raw_output": e.raw_output,
                 "num_calls": e.num_calls,
                 "total_input_tokens": e.input_tokens,
                 "total_output_tokens": e.output_tokens,
@@ -601,6 +885,7 @@ def evaluate_dataset(
                 "gold_index": sample.answer,
                 "gold_label": None if sample.answer is None else option_label(sample.answer),
                 "error": str(e),
+                "raw_output": None,
                 "num_calls": 0,
                 "total_input_tokens": 0,
                 "total_output_tokens": 0,
@@ -692,7 +977,7 @@ def main():
         temperature=DEFAULT_TEMPERATURE,
         top_p=DEFAULT_TOP_P,
         verbose=True,
-        save_path="EBR_final_temp0json"
+        save_path="EBR_final.json"
     )
 
     print("\n===== FINAL RESULT =====")

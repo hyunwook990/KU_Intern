@@ -40,8 +40,8 @@ class GenerationResult:
 
 
 @dataclass
-class DirectCoTResult:
-    reasoning: str
+class DirectRationaleResult:
+    rationale: str
     answer: str
     raw_output: str
     input_tokens: int
@@ -50,7 +50,7 @@ class DirectCoTResult:
     num_calls: int = 1
 
 
-class DirectCoTExecutionError(Exception):
+class DirectRationaleExecutionError(Exception):
     def __init__(self, message: str, usage: Dict, raw_output: Optional[str] = None):
         super().__init__(message)
         self.usage = usage
@@ -61,7 +61,7 @@ class DirectCoTExecutionError(Exception):
 # Prompt
 # =========================================================
 
-DIRECT_COT_PROMPT = """당신은 객관식 문제를 푸는 전문가입니다.
+DIRECT_RATIONALE_PROMPT = """당신은 객관식 문제를 푸는 전문가입니다.
 
 문제:
 {question}
@@ -70,26 +70,27 @@ DIRECT_COT_PROMPT = """당신은 객관식 문제를 푸는 전문가입니다.
 {options_text}
 
 작업:
-1. 문제의 핵심 개념을 파악하세요.
-2. 각 선택지를 비교하며 맞는지/틀린지 간단히 검토하세요.
-3. 그 검토를 바탕으로 최종 정답 하나를 고르세요.
+1. 각 선택지를 간단히 비교 검토하세요.
+2. 그 비교를 바탕으로 최종 정답 하나를 고르세요.
+3. 최종 출력에는 비교 결과를 요약한 rationale만 쓰세요.
 
 반드시 아래 JSON 형식으로만 답하세요:
 {{
-  "reasoning": "Step 1: ... Step 2: ... Step 3: ...",
+  "rationale": "선택지 비교를 바탕으로 한 간단한 최종 판단 근거",
   "answer": "A"
 }}
 
 규칙:
-- reasoning에는 step-by-step 판단 과정을 쓰세요.
-- reasoning은 비어 있으면 안 됩니다.
+- rationale은 비어 있으면 안 됩니다.
+- rationale에는 선택지 간 비교 판단이 드러나야 합니다.
+- rationale은 간단히 쓰세요.
 - answer에는 반드시 하나의 선택지 라벨만 넣으세요.
 - answer에는 선택지 내용 전체나 일부를 쓰지 말고 라벨만 쓰세요.
 - JSON 이외의 텍스트는 출력하지 마세요.
 """
 
 
-REPAIR_DIRECT_COT_PROMPT = """아래 출력은 형식이 깨졌거나 JSON 파싱이 실패했습니다.
+REPAIR_DIRECT_RATIONALE_PROMPT = """아래 출력은 형식이 깨졌거나 JSON 파싱이 실패했습니다.
 의미는 최대한 유지하고 반드시 JSON만 다시 출력하세요.
 
 원래 출력:
@@ -97,13 +98,13 @@ REPAIR_DIRECT_COT_PROMPT = """아래 출력은 형식이 깨졌거나 JSON 파�
 
 반드시 아래 형식으로만 출력하세요:
 {{
-  "reasoning": "Step 1: ... Step 2: ... Step 3: ...",
+  "rationale": "선택지 비교를 바탕으로 한 간단한 최종 판단 근거",
   "answer": "A"
 }}
 
 규칙:
 - JSON 이외의 텍스트는 절대 출력하지 마세요.
-- reasoning은 비어 있으면 안 됩니다.
+- rationale은 비어 있으면 안 됩니다.
 - answer는 반드시 하나의 라벨만 출력하세요. 예: "A"
 """
 
@@ -341,10 +342,10 @@ def safe_json_loads(text: str) -> dict:
 
 def canonicalize_keys(data: dict) -> dict:
     key_aliases = {
-        "reasoning": "reasoning",
-        "rationale": "reasoning",
-        "reason": "reasoning",
-        "explanation": "reasoning",
+        "rationale": "rationale",
+        "reasoning": "rationale",
+        "reason": "rationale",
+        "explanation": "rationale",
         "answer": "answer",
         "final_answer": "answer",
     }
@@ -475,31 +476,31 @@ def resolve_answer_to_label(
     raise ValueError(f"Invalid answer text: {raw_answer}")
 
 
-def repair_direct_cot_output(
+def repair_direct_rationale_output(
     llm: HFLLM,
     raw_output: str,
     temperature: float = 0.0
 ) -> GenerationResult:
-    prompt = REPAIR_DIRECT_COT_PROMPT.format(raw_output=raw_output)
+    prompt = REPAIR_DIRECT_RATIONALE_PROMPT.format(raw_output=raw_output)
     return llm.generate(prompt, temperature=temperature)
 
 
-def parse_direct_cot_output_from_text(
+def parse_direct_rationale_output_from_text(
     raw_output: str,
     option_texts: List[str],
     input_tokens: int,
     output_tokens: int,
     total_tokens: int,
     num_calls: int = 1
-) -> DirectCoTResult:
+) -> DirectRationaleResult:
     valid_labels = [option_label(i) for i in range(len(option_texts))]
     data = canonicalize_keys(safe_json_loads(raw_output))
 
-    reasoning = str(data.get("reasoning", "")).strip()
+    rationale = str(data.get("rationale", "")).strip()
     raw_answer = data.get("answer", None)
 
-    if not reasoning:
-        raise ValueError(f"Empty reasoning:\n{raw_output}")
+    if not rationale:
+        raise ValueError(f"Empty rationale:\n{raw_output}")
 
     answer = resolve_answer_to_label(
         raw_answer=raw_answer,
@@ -507,8 +508,8 @@ def parse_direct_cot_output_from_text(
         option_texts=option_texts
     )
 
-    return DirectCoTResult(
-        reasoning=reasoning,
+    return DirectRationaleResult(
+        rationale=rationale,
         answer=answer,
         raw_output=raw_output,
         input_tokens=input_tokens,
@@ -518,7 +519,7 @@ def parse_direct_cot_output_from_text(
     )
 
 
-def parse_direct_cot_output(
+def parse_direct_rationale_output(
     llm: HFLLM,
     raw_output: str,
     option_texts: List[str],
@@ -526,9 +527,9 @@ def parse_direct_cot_output(
     output_tokens: int,
     total_tokens: int,
     temperature: float = 0.0
-) -> DirectCoTResult:
+) -> DirectRationaleResult:
     try:
-        return parse_direct_cot_output_from_text(
+        return parse_direct_rationale_output_from_text(
             raw_output=raw_output,
             option_texts=option_texts,
             input_tokens=input_tokens,
@@ -537,8 +538,8 @@ def parse_direct_cot_output(
             num_calls=1
         )
     except Exception:
-        repaired = repair_direct_cot_output(llm, raw_output, temperature=temperature)
-        return parse_direct_cot_output_from_text(
+        repaired = repair_direct_rationale_output(llm, raw_output, temperature=temperature)
+        return parse_direct_rationale_output_from_text(
             raw_output=repaired.text,
             option_texts=option_texts,
             input_tokens=input_tokens + repaired.input_tokens,
@@ -630,27 +631,27 @@ def build_options_text(options: List[str]) -> str:
     return "\n".join(lines)
 
 
-def build_direct_cot_prompt(sample: QuestionSample) -> str:
-    return DIRECT_COT_PROMPT.format(
+def build_direct_rationale_prompt(sample: QuestionSample) -> str:
+    return DIRECT_RATIONALE_PROMPT.format(
         question=sample.question,
         options_text=build_options_text(sample.options)
     )
 
 
 # =========================================================
-# Direct CoT Inference
+# Direct Comparative Rationale Inference
 # =========================================================
 
-def solve_direct_cot(
+def solve_direct_rationale(
     llm: HFLLM,
     sample: QuestionSample,
     temperature: float = 0.0
 ) -> Dict[str, Any]:
-    prompt = build_direct_cot_prompt(sample)
+    prompt = build_direct_rationale_prompt(sample)
     gen_result = llm.generate(prompt, temperature=temperature)
 
     try:
-        parsed = parse_direct_cot_output(
+        parsed = parse_direct_rationale_output(
             llm=llm,
             raw_output=gen_result.text,
             option_texts=sample.options,
@@ -666,15 +667,15 @@ def solve_direct_cot(
             "output_tokens": gen_result.output_tokens,
             "total_tokens": gen_result.total_tokens
         }
-        raise DirectCoTExecutionError(
-            message=f"DirectCoT parse failed: {e}",
+        raise DirectRationaleExecutionError(
+            message=f"DirectRationale parse failed: {e}",
             usage=usage,
             raw_output=gen_result.text
         ) from e
 
     return {
         "prediction": parsed.answer,
-        "reasoning": parsed.reasoning,
+        "rationale": parsed.rationale,
         "raw_output": parsed.raw_output,
         "input_tokens": parsed.input_tokens,
         "output_tokens": parsed.output_tokens,
@@ -687,7 +688,7 @@ def solve_direct_cot(
 # Evaluation
 # =========================================================
 
-def evaluate_direct_cot(
+def evaluate_direct_rationale(
     llm: HFLLM,
     dataset: List[QuestionSample],
     temperature: float = 0.0,
@@ -709,7 +710,7 @@ def evaluate_direct_cot(
 
     for idx, sample in enumerate(dataset):
         try:
-            output = solve_direct_cot(llm, sample, temperature=temperature)
+            output = solve_direct_rationale(llm, sample, temperature=temperature)
             pred_label = output["prediction"]
 
             is_correct = None if sample.answer is None else (pred_label == sample.answer)
@@ -721,7 +722,7 @@ def evaluate_direct_cot(
                 "prediction": pred_label,
                 "gold": sample.answer,
                 "correct": is_correct,
-                "reasoning": output["reasoning"],
+                "rationale": output["rationale"],
                 "raw_output": output["raw_output"],
                 "num_calls": output["num_calls"],
                 "input_tokens": output["input_tokens"],
@@ -745,7 +746,7 @@ def evaluate_direct_cot(
             if verbose:
                 acc_so_far = correct / total if total > 0 else 0.0
                 print("====================================================")
-                print(output["reasoning"])
+                print(output["rationale"])
                 print("====================================================")
                 print(f"[{idx + 1}/{len(dataset)}]")
                 print("subject:", sample.subject)
@@ -759,7 +760,7 @@ def evaluate_direct_cot(
                 print("current_acc:", round(acc_so_far, 4))
                 print("====================================================")
 
-        except DirectCoTExecutionError as e:
+        except DirectRationaleExecutionError as e:
             skipped += 1
             total += 1
             subject_stats[sample.subject]["total"] += 1
@@ -861,7 +862,7 @@ if __name__ == "__main__":
         num_samples_per_subject=50
     )
 
-    result = evaluate_direct_cot(
+    result = evaluate_direct_rationale(
         llm=llm,
         dataset=dataset,
         temperature=0.0,
@@ -882,4 +883,4 @@ if __name__ == "__main__":
     print("Avg total tokens:", result["avg_total_tokens"])
     print("Avg num calls:", result["avg_num_calls"])
 
-    save_results_json(result, "direct_cot_final.json")
+    save_results_json(result, "direct_rationale_final.json")

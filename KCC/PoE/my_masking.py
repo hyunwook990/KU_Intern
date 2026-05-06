@@ -1,4 +1,3 @@
-# final_explain 생성
 import json
 import re
 from dataclasses import dataclass
@@ -47,6 +46,7 @@ class ModuleAOptionResult:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    num_calls: int = 1
 
 
 @dataclass
@@ -82,6 +82,14 @@ class FinalDecisionResult:
     total_tokens: int
     num_calls: int = 1
 
+    # fallback 분석용
+    used_fallback: bool = False
+    fallback_type: Optional[str] = None
+    fallback_reason: Optional[str] = None
+    fallback_original_answer_text: Optional[str] = None
+    fallback_selected_by_confidence: Optional[float] = None
+    model_confidence_before_fallback: Optional[float] = None
+
 
 @dataclass
 class EliminatedOptionRecord:
@@ -116,7 +124,7 @@ class PipelineExecutionError(Exception):
 # Prompt Templates
 # =========================================================
 
-MODULE_A_PROMPT = """당신은 객관식 문제의 하나의 선택지만 평가하는 전문가입니다.
+MODULE_A_PROMPT = """당신은 객관식 문제의 선택지를 평가하는 전문가입니다.
 
 문제:
 {question}
@@ -125,9 +133,9 @@ MODULE_A_PROMPT = """당신은 객관식 문제의 하나의 선택지만 평가
 {target_label}. {target_option}
 
 작업:
-1. 이 선택지가 정답일 가능성을 평가하세요.
+1. 이 선택지가 정답일 가능성을 confidence 값으로 평가하세요.
 2. 1~2문장으로 rationale을 작성하세요.
-3. 이 선택지가 틀릴 수 있는 이유 또는 한계를 반드시 포함하세요.
+3. 이 선택지가 정답일 가능성이 낮다면 틀릴 수 있는 이유 또는 한계를 반드시 포함하세요.
 
 반드시 아래 JSON 형식으로만 답하세요:
 {{
@@ -173,9 +181,49 @@ FINAL_DECISION_PROMPT = """당신은 객관식 문제의 최종 답안을 결정
 
 규칙:
 - answer는 반드시 현재 살아남은 후보 라벨 중 하나여야 합니다.
-- answer는 반드시 라벨만 출력해야합니다.
+- answer에는 선택지 내용(text) 전체나 일부를 쓰지 말고, 반드시 라벨만 쓰세요.
 - confidence는 최종 답안에 대한 확신도입니다.
 - JSON 이외의 텍스트는 출력하지 마세요.
+"""
+
+
+REPAIR_MODULE_A_PROMPT = """아래 출력은 형식이 깨졌거나 JSON 파싱이 실패했습니다.
+의미는 최대한 유지하고 반드시 JSON만 다시 출력하세요.
+
+원래 출력:
+{raw_output}
+
+반드시 아래 형식으로만 출력하세요:
+{{
+  "rationale": "설명",
+  "confidence": 0.0
+}}
+
+규칙:
+- JSON 이외의 텍스트는 절대 출력하지 마세요.
+- rationale은 비어 있으면 안 됩니다.
+- confidence는 0과 1 사이의 실수여야 합니다.
+"""
+
+
+REPAIR_FINAL_DECISION_PROMPT = """아래 출력은 형식이 깨졌거나 JSON 파싱이 실패했습니다.
+의미는 최대한 유지하고 반드시 JSON만 다시 출력하세요.
+
+원래 출력:
+{raw_output}
+
+반드시 아래 형식으로만 출력하세요:
+{{
+  "answer": "라벨",
+  "explanation": "2~4문장 설명",
+  "confidence": 0.0
+}}
+
+규칙:
+- JSON 이외의 텍스트는 절대 출력하지 마세요.
+- answer는 반드시 하나의 라벨만 출력하세요. 예: "A"
+- explanation은 비어 있으면 안 됩니다.
+- confidence는 0과 1 사이의 실수여야 합니다.
 """
 
 
@@ -258,22 +306,180 @@ class HFLLM:
 # Parsing Utils
 # =========================================================
 
-def extract_json_block(text: str) -> str:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError(f"JSON block not found:\n{text}")
-    return match.group(0)
+def strip_code_fences(text: str) -> str:
+    text = text.strip()
+    text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def normalize_quotes(text: str) -> str:
+    return (
+        text.replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .replace("＂", '"')
+        .replace("＇", "'")
+    )
+
+
+def extract_json_candidates(text: str) -> List[str]:
+    text = strip_code_fences(normalize_quotes(text))
+    candidates = []
+    stack = []
+    start = None
+
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if not stack:
+                start = i
+            stack.append(ch)
+        elif ch == "}":
+            if stack:
+                stack.pop()
+                if not stack and start is not None:
+                    candidates.append(text[start:i + 1])
+                    start = None
+
+    if text.startswith("{") and text.endswith("}"):
+        candidates.append(text)
+
+    unique = []
+    seen = set()
+    for c in candidates:
+        c = c.strip()
+        if c and c not in seen:
+            unique.append(c)
+            seen.add(c)
+    return unique
+
+
+def escape_invalid_backslashes_in_json_string(raw: str) -> str:
+    result = []
+    in_string = False
+    i = 0
+    n = len(raw)
+
+    while i < n:
+        ch = raw[i]
+
+        if ch == '"':
+            backslash_count = 0
+            j = i - 1
+            while j >= 0 and raw[j] == "\\":
+                backslash_count += 1
+                j -= 1
+            if backslash_count % 2 == 0:
+                in_string = not in_string
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == "\\" and in_string:
+            if i + 1 >= n:
+                result.append("\\\\")
+                i += 1
+                continue
+
+            nxt = raw[i + 1]
+
+            if nxt in ['"', "\\", "/", "b", "f", "n", "r", "t"]:
+                result.append("\\")
+                result.append(nxt)
+                i += 2
+                continue
+
+            if nxt == "u":
+                hex_part = raw[i + 2:i + 6]
+                if len(hex_part) == 4 and re.fullmatch(r"[0-9a-fA-F]{4}", hex_part):
+                    result.append("\\u")
+                    result.append(hex_part)
+                    i += 6
+                    continue
+
+            result.append("\\\\")
+            result.append(nxt)
+            i += 2
+            continue
+
+        result.append(ch)
+        i += 1
+
+    return "".join(result)
+
+
+def clean_json_like_string(raw: str) -> str:
+    raw = raw.strip()
+    raw = normalize_quotes(raw)
+    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
+    raw = re.sub(r"(?<=\{|,)\s*'([^']+)'\s*:", r' "\1":', raw)
+    raw = re.sub(
+        r':\s*\'([^\']*)\'',
+        lambda m: ': "' + m.group(1).replace('"', '\\"') + '"',
+        raw
+    )
+    raw = escape_invalid_backslashes_in_json_string(raw)
+    return raw
+
+
+def try_json_loads_variants(raw: str) -> dict:
+    variants = [raw, clean_json_like_string(raw)]
+    last_err = None
+
+    for candidate in variants:
+        try:
+            return json.loads(candidate)
+        except Exception as e:
+            last_err = e
+
+    raise last_err
 
 
 def safe_json_loads(text: str) -> dict:
-    raw = extract_json_block(text)
-    raw = raw.replace("“", '"').replace("”", '"').replace("’", "'")
-    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
-    return json.loads(raw)
+    candidates = extract_json_candidates(text)
+    if not candidates:
+        raise ValueError(f"JSON block not found:\n{text}")
+
+    parsed_objects = []
+    for candidate in candidates:
+        try:
+            parsed_objects.append(try_json_loads_variants(candidate))
+        except Exception:
+            continue
+
+    if not parsed_objects:
+        raise ValueError(f"Valid JSON block not found:\n{text}")
+
+    for obj in reversed(parsed_objects):
+        if isinstance(obj, dict):
+            return obj
+
+    raise ValueError(f"Parsed JSON exists but no dict found:\n{text}")
 
 
 def clamp_confidence(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
+
+
+def parse_confidence_value(value) -> float:
+    if isinstance(value, (int, float)):
+        return clamp_confidence(float(value))
+
+    s = str(value).strip()
+    has_percent = "%" in s
+    s = s.replace("%", "")
+    s = s.replace(",", "")
+
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        raise ValueError(f"Cannot parse confidence: {value}")
+
+    num = float(m.group(0))
+    if has_percent or num > 1.0:
+        num = num / 100.0
+
+    return clamp_confidence(num)
 
 
 def option_label(index: int) -> str:
@@ -302,40 +508,163 @@ def label_to_index(label: str) -> int:
     return labels.index(label)
 
 
-def normalize_final_answer(raw_answer, remaining_labels: List[str]) -> str:
-    s = str(raw_answer).strip().upper()
+def normalize_label(raw_label: str, valid_labels: Optional[List[str]] = None) -> str:
+    s = str(raw_label).strip().upper()
 
-    # 문자/숫자만 남김
-    s = re.sub(r"[^A-Z0-9]", "", s)
+    patterns = [
+        r"^([A-Z])$",
+        r"^([A-Z])[\.\)]?$",
+        r"^OPTION\s*([A-Z])$",
+        r"^ANSWER\s*[:\-]?\s*([A-Z])$",
+        r"^정답\s*[:\-]?\s*([A-Z])$",
+    ]
 
-    # 숫자면 1 -> A, 2 -> B ...
-    if s.isdigit():
-        idx = int(s) - 1
-        if 0 <= idx < len(remaining_labels):
-            return remaining_labels[idx]
-        raise ValueError(
-            f"Invalid numeric answer: raw={raw_answer}, normalized={s}, valid={remaining_labels}"
-        )
+    for pattern in patterns:
+        m = re.match(pattern, s)
+        if m:
+            candidate = m.group(1)
+            if valid_labels is None or candidate in valid_labels:
+                return candidate
 
-    # 문자면 그대로 비교
-    if s in remaining_labels:
-        return s
+    s_alnum = re.sub(r"[^A-Z0-9가-힣]", "", s)
 
-    raise ValueError(
-        f"Invalid final answer: raw={raw_answer}, normalized={s}, valid={remaining_labels}"
+    if s_alnum.isdigit():
+        idx = int(s_alnum) - 1
+        labels = valid_labels if valid_labels is not None else list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        if 0 <= idx < len(labels):
+            return labels[idx]
+
+    m = re.search(r"\b([A-Z])\b", s)
+    if m:
+        candidate = m.group(1)
+        if valid_labels is None or candidate in valid_labels:
+            return candidate
+
+    raise ValueError(f"Invalid label text: {raw_label}")
+
+
+def normalize_option_text_for_match(text: str) -> str:
+    text = str(text).strip().lower()
+    text = normalize_quotes(text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[\"'“”‘’`]", "", text)
+    text = re.sub(r"[.,;:!?()\[\]{}<>]", "", text)
+    return text.strip()
+
+
+def resolve_answer_to_label(
+    raw_answer,
+    remaining_labels: List[str],
+    remaining_texts: List[str]
+) -> str:
+    try:
+        return normalize_label(str(raw_answer), valid_labels=remaining_labels)
+    except Exception:
+        pass
+
+    answer_text = str(raw_answer).strip()
+    norm_answer = normalize_option_text_for_match(answer_text)
+
+    for label, text in zip(remaining_labels, remaining_texts):
+        if answer_text == str(text).strip():
+            return label
+
+    normalized_text_map = {
+        label: normalize_option_text_for_match(text)
+        for label, text in zip(remaining_labels, remaining_texts)
+    }
+
+    for label, norm_text in normalized_text_map.items():
+        if norm_answer == norm_text:
+            return label
+
+    for label, text in zip(remaining_labels, remaining_texts):
+        merged_candidates = [
+            f"{label}. {text}",
+            f"{label}) {text}",
+            f"{label} {text}",
+            f"정답: {label}. {text}",
+            f"answer: {label}. {text}",
+        ]
+        merged_candidates = [normalize_option_text_for_match(x) for x in merged_candidates]
+        if norm_answer in merged_candidates:
+            return label
+
+    contains_matches = []
+    for label, norm_text in normalized_text_map.items():
+        if norm_answer and (norm_answer in norm_text or norm_text in norm_answer):
+            contains_matches.append(label)
+
+    if len(contains_matches) == 1:
+        return contains_matches[0]
+
+    raise ValueError(f"Invalid answer text: {raw_answer}")
+
+
+def normalize_final_answer(
+    raw_answer,
+    remaining_labels: List[str],
+    remaining_texts: List[str]
+) -> str:
+    return resolve_answer_to_label(
+        raw_answer=raw_answer,
+        remaining_labels=remaining_labels,
+        remaining_texts=remaining_texts
     )
 
 
-def parse_module_a_option_output(
+def canonicalize_keys(data: dict) -> dict:
+    key_aliases = {
+        "rationale": "rationale",
+        "reasoning": "rationale",
+        "reason": "rationale",
+        "explanation": "explanation",
+        "confidence": "confidence",
+        "score": "confidence",
+        "probability": "confidence",
+        "answer": "answer",
+        "final_answer": "answer",
+    }
+
+    normalized = {}
+    for k, v in data.items():
+        nk = key_aliases.get(str(k).strip().lower(), str(k).strip().lower())
+        normalized[nk] = v
+    return normalized
+
+
+def repair_module_a_output(
+    llm: HFLLM,
+    raw_output: str,
+    temperature: float = 0.0
+) -> GenerationResult:
+    prompt = REPAIR_MODULE_A_PROMPT.format(raw_output=raw_output)
+    return llm.generate(prompt, temperature=temperature)
+
+
+def repair_final_decision_output(
+    llm: HFLLM,
+    raw_output: str,
+    temperature: float = 0.0
+) -> GenerationResult:
+    prompt = REPAIR_FINAL_DECISION_PROMPT.format(raw_output=raw_output)
+    return llm.generate(prompt, temperature=temperature)
+
+
+def parse_module_a_option_output_from_text(
     raw_output: str,
     input_tokens: int,
     output_tokens: int,
-    total_tokens: int
+    total_tokens: int,
+    num_calls: int = 1
 ) -> ModuleAOptionResult:
-    data = safe_json_loads(raw_output)
+    data = canonicalize_keys(safe_json_loads(raw_output))
 
-    rationale = str(data["rationale"]).strip()
-    confidence = clamp_confidence(float(data["confidence"]))
+    rationale = str(data.get("rationale", "")).strip()
+    confidence = parse_confidence_value(data["confidence"])
+
+    if not rationale:
+        raise ValueError(f"Empty rationale:\n{raw_output}")
 
     return ModuleAOptionResult(
         rationale=rationale,
@@ -343,8 +672,98 @@ def parse_module_a_option_output(
         raw_output=raw_output,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        total_tokens=total_tokens
+        total_tokens=total_tokens,
+        num_calls=num_calls
     )
+
+
+def parse_module_a_option_output(
+    llm: HFLLM,
+    raw_output: str,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    temperature: float = 0.0
+) -> ModuleAOptionResult:
+    try:
+        return parse_module_a_option_output_from_text(
+            raw_output=raw_output,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            num_calls=1
+        )
+    except Exception:
+        repaired = repair_module_a_output(llm, raw_output, temperature=temperature)
+        return parse_module_a_option_output_from_text(
+            raw_output=repaired.text,
+            input_tokens=input_tokens + repaired.input_tokens,
+            output_tokens=output_tokens + repaired.output_tokens,
+            total_tokens=total_tokens + repaired.total_tokens,
+            num_calls=2
+        )
+
+
+def parse_final_decision_output_from_text(
+    raw_output: str,
+    remaining_labels: List[str],
+    remaining_texts: List[str]
+) -> Dict:
+    data = canonicalize_keys(safe_json_loads(raw_output))
+
+    raw_answer = data.get("answer", None)
+    raw_confidence = data.get("confidence", None)
+
+    final_answer_label = normalize_final_answer(
+        raw_answer=raw_answer,
+        remaining_labels=remaining_labels,
+        remaining_texts=remaining_texts
+    )
+    final_explanation = str(data.get("explanation", data.get("rationale", ""))).strip()
+    model_confidence = parse_confidence_value(raw_confidence)
+
+    if not final_explanation:
+        raise ValueError(f"Empty final explanation:\n{raw_output}")
+
+    return {
+        "raw_answer": None if raw_answer is None else str(raw_answer),
+        "raw_confidence": raw_confidence,
+        "final_answer_label": final_answer_label,
+        "final_explanation": final_explanation,
+        "model_confidence": model_confidence,
+    }
+
+
+def parse_final_decision_output(
+    llm: HFLLM,
+    raw_output: str,
+    remaining_labels: List[str],
+    remaining_texts: List[str],
+    temperature: float = 0.0
+) -> Dict:
+    try:
+        parsed = parse_final_decision_output_from_text(
+            raw_output,
+            remaining_labels,
+            remaining_texts
+        )
+        parsed["repair_input_tokens"] = 0
+        parsed["repair_output_tokens"] = 0
+        parsed["repair_total_tokens"] = 0
+        parsed["num_calls"] = 1
+        return parsed
+    except Exception:
+        repaired = repair_final_decision_output(llm, raw_output, temperature=temperature)
+        parsed = parse_final_decision_output_from_text(
+            repaired.text,
+            remaining_labels,
+            remaining_texts
+        )
+        parsed["repair_input_tokens"] = repaired.input_tokens
+        parsed["repair_output_tokens"] = repaired.output_tokens
+        parsed["repair_total_tokens"] = repaired.total_tokens
+        parsed["num_calls"] = 2
+        return parsed
 
 
 def format_reason_block(
@@ -483,6 +902,8 @@ class ModuleA:
         output_tokens_list = []
         total_tokens_list = []
 
+        total_num_calls = 0
+
         print("==============================Module_A==============================")
         for target_idx in range(len(options)):
             prompt = self._build_prompt(
@@ -493,25 +914,23 @@ class ModuleA:
             )
 
             gen_result = self.llm.generate(prompt, temperature=temperature)
-
-            input_tokens_list.append(gen_result.input_tokens)
-            output_tokens_list.append(gen_result.output_tokens)
-            total_tokens_list.append(gen_result.total_tokens)
             raw_outputs.append(gen_result.text)
 
             try:
                 parsed = parse_module_a_option_output(
-                    gen_result.text,
-                    gen_result.input_tokens,
-                    gen_result.output_tokens,
-                    gen_result.total_tokens
+                    llm=self.llm,
+                    raw_output=gen_result.text,
+                    input_tokens=gen_result.input_tokens,
+                    output_tokens=gen_result.output_tokens,
+                    total_tokens=gen_result.total_tokens,
+                    temperature=temperature
                 )
             except Exception as e:
                 partial_usage = {
-                    "num_calls": len(total_tokens_list),
-                    "input_tokens": sum(input_tokens_list),
-                    "output_tokens": sum(output_tokens_list),
-                    "total_tokens": sum(total_tokens_list)
+                    "num_calls": total_num_calls + 1,
+                    "input_tokens": sum(input_tokens_list) + gen_result.input_tokens,
+                    "output_tokens": sum(output_tokens_list) + gen_result.output_tokens,
+                    "total_tokens": sum(total_tokens_list) + gen_result.total_tokens
                 }
                 raise ModuleExecutionError(
                     module_name="module_a",
@@ -522,6 +941,10 @@ class ModuleA:
 
             rationales.append(parsed.rationale)
             confidences.append(parsed.confidence)
+            input_tokens_list.append(parsed.input_tokens)
+            output_tokens_list.append(parsed.output_tokens)
+            total_tokens_list.append(parsed.total_tokens)
+            total_num_calls += parsed.num_calls
 
         return ModuleAResult(
             rationales=rationales,
@@ -530,7 +953,7 @@ class ModuleA:
             input_tokens_list=input_tokens_list,
             output_tokens_list=output_tokens_list,
             total_tokens_list=total_tokens_list,
-            num_calls=len(options),
+            num_calls=total_num_calls,
             total_input_tokens=sum(input_tokens_list),
             total_output_tokens=sum(output_tokens_list),
             total_tokens=sum(total_tokens_list)
@@ -588,7 +1011,6 @@ class FirstElimination:
                 elimination_mask.append(0)
                 remaining_indices.append(idx)
 
-        # 안전장치: 다 제거되면 top1 하나는 살림
         if len(remaining_indices) == 0:
             top_idx = max(range(len(confidences)), key=lambda i: confidences[i])
             elimination_mask = [1] * len(confidences)
@@ -668,10 +1090,17 @@ class FinalDecision:
         gen_result = self.llm.generate(prompt, temperature=temperature)
 
         try:
-            data = safe_json_loads(gen_result.text)
-            final_answer_label = normalize_final_answer(data["answer"], remaining_labels)
-            final_explanation = str(data["explanation"]).strip()
-            model_confidence = clamp_confidence(float(data["confidence"]))
+            parsed = parse_final_decision_output(
+                llm=self.llm,
+                raw_output=gen_result.text,
+                remaining_labels=remaining_labels,
+                remaining_texts=remaining_texts,
+                temperature=temperature
+            )
+
+            final_answer_label = parsed["final_answer_label"]
+            final_explanation = parsed["final_explanation"]
+            model_confidence = parsed["model_confidence"]
 
             chosen_idx = remaining_labels.index(final_answer_label)
             base_confidence = remaining_confidences[chosen_idx]
@@ -679,28 +1108,64 @@ class FinalDecision:
                 self.calibration_fn(max(base_confidence, model_confidence))
             )
 
-        except Exception as e:
-            raise ModuleExecutionError(
-                module_name="final_decision",
-                usage={
-                    "num_calls": 1,
-                    "input_tokens": gen_result.input_tokens,
-                    "output_tokens": gen_result.output_tokens,
-                    "total_tokens": gen_result.total_tokens
-                },
-                message=f"FinalDecision parse failed: {e}",
-                raw_output=gen_result.text
-            ) from e
+            total_input_tokens = gen_result.input_tokens + parsed["repair_input_tokens"]
+            total_output_tokens = gen_result.output_tokens + parsed["repair_output_tokens"]
+            total_tokens = gen_result.total_tokens + parsed["repair_total_tokens"]
+            num_calls = parsed["num_calls"]
 
-        return FinalDecisionResult(
-            final_answer_label=final_answer_label,
-            final_explanation=final_explanation,
-            calibrated_confidence=calibrated_confidence,
-            raw_output=gen_result.text,
-            input_tokens=gen_result.input_tokens,
-            output_tokens=gen_result.output_tokens,
-            total_tokens=gen_result.total_tokens
-        )
+            return FinalDecisionResult(
+                final_answer_label=final_answer_label,
+                final_explanation=final_explanation,
+                calibrated_confidence=calibrated_confidence,
+                raw_output=gen_result.text,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                total_tokens=total_tokens,
+                num_calls=num_calls,
+                used_fallback=False,
+                fallback_type=None,
+                fallback_reason=None,
+                fallback_original_answer_text=parsed.get("raw_answer"),
+                fallback_selected_by_confidence=base_confidence,
+                model_confidence_before_fallback=model_confidence
+            )
+
+        except Exception as e:
+            top_idx = max(range(len(remaining_confidences)), key=lambda i: remaining_confidences[i])
+            fallback_label = remaining_labels[top_idx]
+            fallback_confidence = remaining_confidences[top_idx]
+
+            raw_answer_match = None
+            try:
+                data = canonicalize_keys(safe_json_loads(gen_result.text))
+                if "answer" in data:
+                    raw_answer_match = str(data["answer"])
+            except Exception:
+                raw_answer_match = None
+
+            fallback_explanation = (
+                f"FinalDecision 파싱에 실패하여 fallback을 적용했습니다. "
+                f"모델 출력에서 유효한 라벨을 추출하지 못했으므로, "
+                f"남아 있는 후보 중 confidence가 가장 높은 {fallback_label}를 최종 정답으로 선택했습니다. "
+                f"(parse error: {e})"
+            )
+
+            return FinalDecisionResult(
+                final_answer_label=fallback_label,
+                final_explanation=fallback_explanation,
+                calibrated_confidence=clamp_confidence(self.calibration_fn(fallback_confidence)),
+                raw_output=gen_result.text,
+                input_tokens=gen_result.input_tokens,
+                output_tokens=gen_result.output_tokens,
+                total_tokens=gen_result.total_tokens,
+                num_calls=1,
+                used_fallback=True,
+                fallback_type="top1_confidence",
+                fallback_reason=str(e),
+                fallback_original_answer_text=raw_answer_match,
+                fallback_selected_by_confidence=fallback_confidence,
+                model_confidence_before_fallback=None
+            )
 
 
 # =========================================================
@@ -835,9 +1300,6 @@ class EliminationPipeline:
         sample_usage = self._init_usage()
 
         try:
-            # -------------------------------------------------
-            # 1) 각 보기마다 rationale + confidence
-            # -------------------------------------------------
             a_result = self.module_a.run(
                 question=sample.question,
                 options=current_options,
@@ -854,9 +1316,6 @@ class EliminationPipeline:
                 total_tokens=a_result.total_tokens
             )
 
-            # -------------------------------------------------
-            # 2) 1차 제거: top1 ratio or mean
-            # -------------------------------------------------
             first_result = self.first_elimination.run(
                 options=current_options,
                 confidences=a_result.confidences
@@ -906,9 +1365,6 @@ class EliminationPipeline:
                 }
             })
 
-            # -------------------------------------------------
-            # 3) 추가 제거 없음
-            # -------------------------------------------------
             final_result = self.final_decision.run(
                 question=sample.question,
                 remaining_labels=remaining_labels,
@@ -945,7 +1401,13 @@ class EliminationPipeline:
                 ],
                 "final_answer_label": final_result.final_answer_label,
                 "final_explanation": final_result.final_explanation,
-                "model_raw_output": final_result.raw_output
+                "model_raw_output": final_result.raw_output,
+                "used_fallback": final_result.used_fallback,
+                "fallback_type": final_result.fallback_type,
+                "fallback_reason": final_result.fallback_reason,
+                "fallback_original_answer_text": final_result.fallback_original_answer_text,
+                "fallback_selected_by_confidence": final_result.fallback_selected_by_confidence,
+                "model_confidence_before_fallback": final_result.model_confidence_before_fallback
             }
 
             return {
@@ -954,7 +1416,14 @@ class EliminationPipeline:
                     "answer_label": final_result.final_answer_label,
                     "answer_text": sample.options[label_to_index(final_result.final_answer_label)],
                     "final_explanation": final_result.final_explanation,
-                    "confidence": final_result.calibrated_confidence
+                    "confidence": final_result.calibrated_confidence,
+                    "used_fallback": final_result.used_fallback,
+                    "fallback_type": final_result.fallback_type,
+                    "fallback_reason": final_result.fallback_reason,
+                    "fallback_original_answer_text": final_result.fallback_original_answer_text,
+                    "fallback_selected_by_confidence": final_result.fallback_selected_by_confidence,
+                    "model_confidence_before_fallback": final_result.model_confidence_before_fallback,
+                    "model_raw_output": final_result.raw_output
                 },
                 "usage": sample_usage
             }
@@ -1043,8 +1512,10 @@ def evaluate_dataset(
     correct = 0
     total = 0
     skipped = 0
+    fallback_count = 0
 
     skipped_samples = []
+    fallback_samples = []
     subject_stats = defaultdict(lambda: {"total": 0, "correct": 0})
 
     dataset_total_input_tokens = 0
@@ -1063,6 +1534,7 @@ def evaluate_dataset(
 
             pred_label = output["final"]["answer_label"]
             usage = output["usage"]
+            used_fallback = output["final"]["used_fallback"]
 
             row = {
                 "subject": sample.subject,
@@ -1073,6 +1545,13 @@ def evaluate_dataset(
                 "correct": None if sample.answer is None else pred_label == sample.answer,
                 "final_confidence": output["final"]["confidence"],
                 "final_explanation": output["final"]["final_explanation"],
+                "used_fallback": output["final"]["used_fallback"],
+                "fallback_type": output["final"]["fallback_type"],
+                "fallback_reason": output["final"]["fallback_reason"],
+                "fallback_original_answer_text": output["final"]["fallback_original_answer_text"],
+                "fallback_selected_by_confidence": output["final"]["fallback_selected_by_confidence"],
+                "model_confidence_before_fallback": output["final"]["model_confidence_before_fallback"],
+                "final_raw_output": output["final"]["model_raw_output"],
                 "num_calls": usage["num_calls"],
                 "total_input_tokens": usage["total_input_tokens"],
                 "total_output_tokens": usage["total_output_tokens"],
@@ -1081,6 +1560,23 @@ def evaluate_dataset(
                 "trace": output["trace"]
             }
             predictions.append(row)
+
+            if used_fallback:
+                fallback_count += 1
+                fallback_samples.append({
+                    "index": idx,
+                    "subject": sample.subject,
+                    "question": sample.question,
+                    "options": sample.options,
+                    "prediction": pred_label,
+                    "gold": sample.answer,
+                    "correct": row["correct"],
+                    "fallback_type": row["fallback_type"],
+                    "fallback_reason": row["fallback_reason"],
+                    "fallback_original_answer_text": row["fallback_original_answer_text"],
+                    "fallback_selected_by_confidence": row["fallback_selected_by_confidence"],
+                    "final_raw_output": row["final_raw_output"]
+                })
 
             if sample.answer is not None:
                 total += 1
@@ -1104,6 +1600,10 @@ def evaluate_dataset(
                 print("question:", sample.question)
                 print("prediction:", pred_label)
                 print("gold:", sample.answer)
+                print("used_fallback:", used_fallback)
+                if used_fallback:
+                    print("fallback_reason:", output["final"]["fallback_reason"])
+                    print("fallback_original_answer_text:", output["final"]["fallback_original_answer_text"])
                 print("num_calls:", usage["num_calls"])
                 print("total_input_tokens:", usage["total_input_tokens"])
                 print("total_output_tokens:", usage["total_output_tokens"])
@@ -1111,7 +1611,7 @@ def evaluate_dataset(
                 print("module_a_total_tokens:", usage["by_module"]["module_a"]["total_tokens"])
                 print("final_decision_total_tokens:", usage["by_module"]["final_decision"]["total_tokens"])
                 print("#############################################################")
-                print(f"[{idx + 1}/{len(dataset)}] current accuracy = {acc_so_far:.4f}, skipped = {skipped}")
+                print(f"[{idx + 1}/{len(dataset)}] current accuracy = {acc_so_far:.4f}, skipped = {skipped}, fallback = {fallback_count}")
 
         except PipelineExecutionError as e:
             skipped += 1
@@ -1198,6 +1698,7 @@ def evaluate_dataset(
         "num_skipped": skipped,
         "num_processed": num_processed,
         "num_attempted": num_attempted,
+        "num_fallback": fallback_count,
         "dataset_total_input_tokens": dataset_total_input_tokens,
         "dataset_total_output_tokens": dataset_total_output_tokens,
         "dataset_total_tokens": dataset_total_tokens,
@@ -1209,6 +1710,7 @@ def evaluate_dataset(
         "dataset_module_usage": dataset_module_usage,
         "avg_module_usage": avg_module_usage,
         "results": predictions,
+        "fallback_samples": fallback_samples,
         "skipped_samples": skipped_samples
     }
 
@@ -1235,7 +1737,7 @@ if __name__ == "__main__":
     pipeline = EliminationPipeline(
         llm=llm,
         module_a_prompt_template=MODULE_A_PROMPT,
-        first_elimination_mode="top1_ratio",   # "top1_ratio" or "mean"
+        first_elimination_mode="top1_ratio",
         top1_ratio=0.8,
         calibration_fn=lambda x: x
     )
@@ -1261,8 +1763,7 @@ if __name__ == "__main__":
     print("Num evaluated:", result["num_evaluated"])
     print("Num correct:", result["num_correct"])
     print("Num skipped:", result["num_skipped"])
-    print("Num processed:", result["num_processed"])
-    print("Num attempted:", result["num_attempted"])
+    print("Num fallback:", result["num_fallback"])
     print("Dataset total input tokens:", result["dataset_total_input_tokens"])
     print("Dataset total output tokens:", result["dataset_total_output_tokens"])
     print("Dataset total tokens:", result["dataset_total_tokens"])
@@ -1279,5 +1780,8 @@ if __name__ == "__main__":
     print("\n===== Avg Module Usage =====")
     print("Module A:", result["avg_module_usage"]["module_a"])
     print("Final Decision:", result["avg_module_usage"]["final_decision"])
+
+    print("\n===== Fallback Summary =====")
+    print("Num fallback:", result["num_fallback"])
 
     save_results_json(result, "my_masking.json")
